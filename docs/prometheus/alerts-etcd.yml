@@ -1,0 +1,76 @@
+groups:
+  - name: etcd
+    rules:
+      - alert: etcdNoLeader
+        expr: etcd_server_has_leader{job=~".*etcd.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: etcd 集群无 leader
+          description: 'etcd cluster "{{ $labels.job }}": member {{ $labels.instance }} has no leader.'
+          runbook_url: https://monitoring.mixins.dev/etcd/#alerts
+
+      - alert: etcdMembersDown
+        expr: |
+          max without (endpoint) (
+            sum without (instance) (up{job=~".*etcd.*"} == bool 0)
+            or
+            count without (To) (
+              sum without (instance) (rate(etcd_network_peer_sent_failures_total{job=~".*etcd.*"}[120s])) > 0.01
+            )
+          ) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: etcd 成员不可用
+          description: 'etcd cluster "{{ $labels.job }}": members are down ({{ $value }}).'
+          runbook_url: https://monitoring.mixins.dev/etcd/#alerts
+
+      - alert: etcdHighNumberOfLeaderChanges
+        expr: |
+          increase((max without (instance) (etcd_server_leader_changes_seen_total{job=~".*etcd.*"}) or 0*absent(etcd_server_leader_changes_seen_total{job=~".*etcd.*"}))[15m:1m]) >= 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: etcd leader 频繁变更
+          description: 'etcd cluster "{{ $labels.job }}": {{ $value }} leader changes within the last 15 minutes.'
+          runbook_url: https://monitoring.mixins.dev/etcd/#alerts
+
+      - alert: etcdHighFsyncDurations
+        expr: |
+          histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket{job=~".*etcd.*"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: etcd WAL fsync 延迟过高（99th）
+          description: 'etcd cluster "{{ $labels.job }}": 99th percentile fsync durations are {{ $value }}s on etcd instance {{ $labels.instance }}.'
+          runbook_url: https://runbooks.prometheus-operator.dev/runbooks/etcd/etcdhighfsyncdurations/
+
+      - alert: etcdDatabaseQuotaLowSpace
+        expr: |
+          (last_over_time(etcd_mvcc_db_total_size_in_bytes{job=~".*etcd.*"}[5m]) / last_over_time(etcd_server_quota_backend_bytes{job=~".*etcd.*"}[5m]))*100 > 95
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: etcd DB 接近 quota（写入将被禁用）
+          description: 'etcd cluster "{{ $labels.job }}": database size exceeds the defined quota on {{ $labels.instance }}.'
+          runbook_url: https://monitoring.mixins.dev/etcd/#alerts
+
+      - alert: etcdDatabaseHighFragmentationRatio
+        expr: |
+          (last_over_time(etcd_mvcc_db_total_size_in_use_in_bytes{job=~".*etcd.*"}[5m]) / last_over_time(etcd_mvcc_db_total_size_in_bytes{job=~".*etcd.*"}[5m])) < 0.5
+          and
+          etcd_mvcc_db_total_size_in_use_in_bytes{job=~".*etcd.*"} > 104857600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: etcd 碎片率过高（建议 defrag）
+          description: 'etcd cluster "{{ $labels.job }}": database size in use is less than 50% of allocated size on {{ $labels.instance }}.'
+          runbook_url: https://etcd.io/docs/v3.5/op-guide/maintenance/#defragmentation
+

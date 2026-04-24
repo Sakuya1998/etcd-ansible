@@ -1,0 +1,180 @@
+---
+# TLS 证书轮转（auto CA 模式）
+# - hot_reload：覆盖证书文件后不重启 etcd（etcd 会在新连接时重载证书）
+# - rolling_restart：在 hot_reload 基础上，按 followers→leader last 滚动重启，强制刷新 peer 连接
+
+- name: Preflight and decide whether to rotate
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_admin_host: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+
+  tasks:
+    - name: Ensure auto PKI mode
+      ansible.builtin.assert:
+        that:
+          - etcd_pki_mode | default('byo') == 'auto'
+        fail_msg: "当前 playbook 仅支持 etcd_pki_mode=auto。BYO 场景请自行签发新证书后用 roles/etcd 分发，并选择 rolling_restart 触发生效。"
+      run_once: true
+
+    - name: Ensure rotation is enabled
+      ansible.builtin.assert:
+        that:
+          - etcd_cert_rotate | bool
+        fail_msg: "请先设置 etcd_cert_rotate=true（建议在 group_vars 或 --extra-vars 中开启），再执行轮转。"
+      run_once: true
+
+    - name: Check server cert expiry (openssl -checkend)
+      ansible.builtin.command: >
+        bash -lc "openssl x509 -in {{ etcd_pki_dir }}/server.crt -noout -checkend $(( {{ etcd_cert_min_remaining_days }} * 86400 ))"
+      register: _checkend
+      changed_when: false
+      failed_when: false
+      when: not (etcd_cert_force_rotate | bool)
+
+    - name: Set per-host rotate flag
+      ansible.builtin.set_fact:
+        etcd_cert_should_rotate: "{{ (etcd_cert_force_rotate | bool) or (_checkend.rc is defined and _checkend.rc != 0) }}"
+
+    - name: Decide whether any host needs rotation
+      ansible.builtin.set_fact:
+        _any_rotate: "{{ (groups['etcd'] | map('extract', hostvars, 'etcd_cert_should_rotate') | select('equalto', true) | list | length) > 0 }}"
+      run_once: true
+
+    - name: Skip rotation when not needed
+      ansible.builtin.debug:
+        msg: "所有节点证书在 {{ etcd_cert_min_remaining_days }} 天内均不会过期，且未启用 etcd_cert_force_rotate；跳过轮转。"
+      when: not _any_rotate
+      run_once: true
+
+    - name: End play when rotation not needed
+      ansible.builtin.meta: end_play
+      when: not _any_rotate
+      run_once: true
+
+- name: Rotate leaf certificates (serial)
+  hosts: etcd
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Rotate certs (auto CA)
+      ansible.builtin.include_role:
+        name: etcd_pki
+        tasks_from: rotate.yml
+
+- name: Hot reload validation (no restart)
+  hosts: etcd
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Health check after cert overwrite
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: health.yml
+
+- name: Compute etcd leader host (for rolling restart)
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Skip when not rolling_restart mode
+      ansible.builtin.meta: end_play
+      when: etcd_cert_rotate_mode != 'rolling_restart'
+      run_once: true
+
+    - name: Build cluster endpoints list
+      ansible.builtin.set_fact:
+        _etcd_cluster_endpoints: >-
+          {%- set eps = [] -%}
+          {%- set proto = (etcd_tls_enabled | bool) | ternary('https','http') -%}
+          {%- for h in groups['etcd'] -%}
+          {%- set addr = (hostvars[h][etcd_node_address_var | default('ansible_host')] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+          {%- set _ = eps.append(proto ~ '://' ~ addr ~ ':' ~ etcd_client_port) -%}
+          {%- endfor -%}
+          {{ eps | join(',') }}
+      run_once: true
+
+    - name: Get endpoint status (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ _etcd_cluster_endpoints }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint status -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _etcd_status_json
+      changed_when: false
+      run_once: true
+
+    - name: Parse leader endpoint
+      ansible.builtin.set_fact:
+        etcd_leader_endpoint: "{{ (_etcd_status_json.stdout | from_json) | selectattr('IsLeader','equalto', true) | map(attribute='Endpoint') | first }}"
+      run_once: true
+
+    - name: Extract leader address from endpoint url
+      ansible.builtin.set_fact:
+        etcd_leader_addr: "{{ etcd_leader_endpoint | regex_replace('^https?://([^:]+):.*$', '\\\\1') }}"
+      run_once: true
+
+    - name: Map leader address back to inventory hostname
+      ansible.builtin.set_fact:
+        etcd_leader_host: >-
+          {%- set found = '' -%}
+          {%- for h in groups['etcd'] -%}
+          {%- set addr = (hostvars[h][etcd_node_address_var | default('ansible_host')] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+          {%- if addr == etcd_leader_addr or h == etcd_leader_addr -%}
+          {%- set found = h -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ found }}
+      run_once: true
+
+    - name: Create dynamic groups (followers/leader)
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: "{{ (item == etcd_leader_host) | ternary('etcd_leader','etcd_followers') }}"
+      loop: "{{ groups['etcd'] }}"
+      run_once: true
+
+- name: Rolling restart followers after cert rotate
+  hosts: etcd_followers
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Restart etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: restarted
+
+    - name: Health check
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: health.yml
+
+- name: Rolling restart leader (last) after cert rotate
+  hosts: etcd_leader
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Restart etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: restarted
+
+    - name: Health check
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: health.yml
+

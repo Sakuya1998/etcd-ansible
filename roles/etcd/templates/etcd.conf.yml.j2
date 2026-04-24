@@ -1,0 +1,58 @@
+{#-
+  etcd v3.5 支持 YAML config file（key 名即 flag 名）
+  参考：https://etcd.io/docs/v3.5/op-guide/configuration/
+-#}
+{% set node_addr = hostvars[inventory_hostname][etcd_node_address_var] | default(ansible_host | default(inventory_hostname)) %}
+{% set client_proto = (etcd_tls_enabled | bool) | ternary('https', 'http') %}
+
+name: "{{ inventory_hostname }}"
+data-dir: "{{ etcd_data_dir }}"
+{% if etcd_wal_dir | length > 0 %}
+wal-dir: "{{ etcd_wal_dir }}"
+{% endif %}
+
+listen-peer-urls: "{{ client_proto }}://{{ node_addr }}:{{ etcd_peer_port }}"
+initial-advertise-peer-urls: "{{ client_proto }}://{{ node_addr }}:{{ etcd_peer_port }}"
+
+listen-client-urls: "{{ client_proto }}://{{ node_addr }}:{{ etcd_client_port }},{{ client_proto }}://127.0.0.1:{{ etcd_client_port }}"
+advertise-client-urls: "{{ client_proto }}://{{ node_addr }}:{{ etcd_client_port }}"
+
+initial-cluster-token: "{{ etcd_initial_cluster_token }}"
+initial-cluster-state: "{{ etcd_initial_cluster_state }}"
+initial-cluster: "{{ etcd_initial_cluster }}"
+
+enable-v2: false
+
+# 日志
+logger: "{{ etcd_logger }}"
+log-level: "{{ etcd_log_level }}"
+log-outputs: "{{ etcd_log_outputs }}"
+
+# 存储/性能关键参数
+quota-backend-bytes: {{ etcd_quota_backend_bytes }}
+max-request-bytes: {{ etcd_max_request_bytes }}
+snapshot-count: {{ etcd_snapshot_count }}
+heartbeat-interval: {{ etcd_heartbeat_interval }}
+election-timeout: {{ etcd_election_timeout }}
+
+# 自动 compaction（生产建议启用）
+auto-compaction-mode: "{{ etcd_auto_compaction_mode }}"
+auto-compaction-retention: "{{ etcd_auto_compaction_retention }}"
+
+# 监控
+metrics: "basic"
+listen-metrics-urls: "{{ etcd_metrics_listen_urls }}"
+
+{% if etcd_tls_enabled | bool %}
+# TLS - client
+cert-file: "{{ etcd_pki_dir }}/server.crt"
+key-file: "{{ etcd_pki_dir }}/server.key"
+trusted-ca-file: "{{ etcd_pki_dir }}/ca.crt"
+client-cert-auth: {{ etcd_client_cert_auth | bool }}
+
+# TLS - peer
+peer-cert-file: "{{ etcd_pki_dir }}/peer.crt"
+peer-key-file: "{{ etcd_pki_dir }}/peer.key"
+peer-trusted-ca-file: "{{ etcd_pki_dir }}/ca.crt"
+peer-client-cert-auth: {{ etcd_peer_client_cert_auth | bool }}
+{% endif %}

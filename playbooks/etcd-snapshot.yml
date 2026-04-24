@@ -1,0 +1,15 @@
+---
+- name: "Trigger etcd snapshot once (safe: only leader will execute)"
+  hosts: etcd
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Run snapshot script
+      ansible.builtin.command: /usr/local/sbin/etcd-snapshot.sh
+      register: _snapshot_out
+      changed_when: false
+
+    - name: Show snapshot output
+      ansible.builtin.debug:
+        var: _snapshot_out.stdout

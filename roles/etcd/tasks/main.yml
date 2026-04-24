@@ -1,0 +1,28 @@
+---
+# 说明：
+# - 默认执行“deploy”路径（安装+配置+启动+健康检查+可选 timers）
+# - upgrade/playbook 可通过 include_role(tasks_from=upgrade.yml) 触发滚动升级步骤
+
+- name: Preflight checks & compute facts
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Install etcd binaries
+  ansible.builtin.import_tasks: install.yml
+
+- name: Configure etcd
+  ansible.builtin.import_tasks: configure.yml
+
+- name: Install and start systemd unit
+  ansible.builtin.import_tasks: systemd.yml
+
+- name: Configure snapshot timer
+  ansible.builtin.import_tasks: snapshot.yml
+  when: etcd_snapshot_enabled | bool
+
+- name: Configure defrag timer
+  ansible.builtin.import_tasks: defrag.yml
+  when: etcd_defrag_enabled | bool
+
+- name: Health check
+  ansible.builtin.import_tasks: health.yml
+

@@ -1,0 +1,155 @@
+---
+- name: Compute etcd leader host (for leader-last rolling upgrade)
+  hosts: etcd
+  become: true
+  gather_facts: true
+  vars:
+    # 若启用远端备份，可在升级前要求“必须远端备份成功”
+    etcd_upgrade_require_remote_snapshot: "{{ etcd_upgrade_require_remote_snapshot | default(false) }}"
+
+  tasks:
+    - name: Build cluster endpoints list
+      ansible.builtin.set_fact:
+        _etcd_cluster_endpoints: >-
+          {%- set eps = [] -%}
+          {%- set proto = (etcd_tls_enabled | bool) | ternary('https','http') -%}
+          {%- for h in groups['etcd'] -%}
+          {%- set addr = (hostvars[h][etcd_node_address_var | default('ansible_host')] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+          {%- set _ = eps.append(proto ~ '://' ~ addr ~ ':' ~ etcd_client_port) -%}
+          {%- endfor -%}
+          {{ eps | join(',') }}
+      run_once: true
+
+    - name: Get endpoint status (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ _etcd_cluster_endpoints }}
+        --cacert {{ etcd_pki_dir }}/ca.crt
+        --cert {{ etcd_pki_dir }}/client.crt
+        --key {{ etcd_pki_dir }}/client.key
+        endpoint status -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _etcd_status_json
+      changed_when: false
+      run_once: true
+      when: etcd_tls_enabled | bool
+
+    - name: Get endpoint status (json, no TLS)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ _etcd_cluster_endpoints }}
+        endpoint status -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _etcd_status_json
+      changed_when: false
+      run_once: true
+      when: not (etcd_tls_enabled | bool)
+
+    - name: Parse leader endpoint
+      ansible.builtin.set_fact:
+        _etcd_status_obj: "{{ _etcd_status_json.stdout | from_json }}"
+        etcd_leader_endpoint: "{{ (_etcd_status_json.stdout | from_json) | selectattr('IsLeader','equalto', true) | map(attribute='Endpoint') | first }}"
+      run_once: true
+
+    - name: Extract leader address from endpoint url
+      ansible.builtin.set_fact:
+        etcd_leader_addr: "{{ etcd_leader_endpoint | regex_replace('^https?://([^:]+):.*$', '\\\\1') }}"
+      run_once: true
+
+    - name: Map leader address back to inventory hostname
+      ansible.builtin.set_fact:
+        etcd_leader_host: >-
+          {%- set found = '' -%}
+          {%- for h in groups['etcd'] -%}
+          {%- set addr = (hostvars[h][etcd_node_address_var | default('ansible_host')] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+          {%- if addr == etcd_leader_addr or h == etcd_leader_addr -%}
+          {%- set found = h -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ found }}
+      run_once: true
+
+    - name: Ensure leader host is resolved
+      ansible.builtin.assert:
+        that:
+          - etcd_leader_host | length > 0
+        fail_msg: "无法解析 leader 主机名：leader_endpoint={{ etcd_leader_endpoint }} leader_addr={{ etcd_leader_addr }}"
+      run_once: true
+
+    - name: Pre-upgrade cluster health gate
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ _etcd_cluster_endpoints }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint health --cluster
+      environment:
+        ETCDCTL_API: "3"
+      register: _pre_upgrade_health
+      changed_when: false
+      run_once: true
+
+    - name: Require remote snapshot when configured
+      ansible.builtin.assert:
+        that:
+          - not (etcd_upgrade_require_remote_snapshot | bool) or (etcd_snapshot_backend is defined and etcd_snapshot_backend != 'none')
+        fail_msg: "etcd_upgrade_require_remote_snapshot=true，但当前未配置远端备份（etcd_snapshot_backend=none）。"
+      run_once: true
+
+    - name: Trigger leader snapshot before upgrade
+      ansible.builtin.command: /usr/local/sbin/etcd-snapshot.sh
+      delegate_to: "{{ etcd_leader_host }}"
+      run_once: true
+      register: _snapshot_out
+      changed_when: false
+
+    - name: Validate latest snapshot is readable (etcdutl snapshot status)
+      ansible.builtin.command: >
+        bash -lc "set -euo pipefail;
+        snap=$(ls -1t '{{ etcd_backup_dir }}'/snapshot-'{{ etcd_cluster_name }}'-*.db 2>/dev/null | head -1);
+        test -n \"$snap\";
+        /usr/local/bin/etcdutl snapshot status \"$snap\" -w table"
+      delegate_to: "{{ etcd_leader_host }}"
+      run_once: true
+      changed_when: false
+
+    - name: Create dynamic groups (followers/leader)
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: "{{ (item == etcd_leader_host) | ternary('etcd_leader','etcd_followers') }}"
+      loop: "{{ groups['etcd'] }}"
+      run_once: true
+
+    - name: Show leader/followers
+      ansible.builtin.debug:
+        msg:
+          leader: "{{ etcd_leader_host }}"
+          followers: "{{ groups['etcd'] | difference([etcd_leader_host]) }}"
+      run_once: true
+
+- name: Rolling upgrade etcd followers (serial=1)
+  hosts: etcd_followers
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Upgrade follower node
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: upgrade.yml
+
+- name: Rolling upgrade etcd leader (last)
+  hosts: etcd_leader
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Upgrade leader node
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: upgrade.yml

@@ -1,0 +1,37 @@
+---
+- name: Wait for local client port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ etcd_client_port }}"
+    timeout: 30
+
+- name: Endpoint health (local)
+  ansible.builtin.command: >
+    /usr/local/bin/etcdctl
+    --endpoints={{ etcdctl_endpoints }}
+    {{ etcdctl_tls_args | trim }}
+    endpoint health
+  environment:
+    ETCDCTL_API: "3"
+  register: _etcd_health
+  changed_when: false
+
+- name: Show health output
+  ansible.builtin.debug:
+    var: _etcd_health.stdout
+
+- name: Endpoint status (cluster)
+  ansible.builtin.command: >
+    /usr/local/bin/etcdctl
+    --endpoints={{ etcdctl_endpoints }}
+    {{ etcdctl_tls_args | trim }}
+    endpoint status -w table
+  environment:
+    ETCDCTL_API: "3"
+  register: _etcd_status
+  changed_when: false
+
+- name: Show endpoint status table
+  ansible.builtin.debug:
+    var: _etcd_status.stdout
+

@@ -1,0 +1,95 @@
+---
+- name: Ensure required packages are installed
+  ansible.builtin.package:
+    name:
+      - ca-certificates
+      - tar
+      - gzip
+    state: present
+
+- name: Ensure etcd group exists
+  ansible.builtin.group:
+    name: "{{ etcd_group }}"
+    system: true
+
+- name: Ensure etcd user exists
+  ansible.builtin.user:
+    name: "{{ etcd_user }}"
+    group: "{{ etcd_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Ensure base dir exists
+  ansible.builtin.file:
+    path: "{{ etcd_base_dir | default('/data/etcd') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure etcd directories exist (data/wal/log)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ etcd_user }}"
+    group: "{{ etcd_group }}"
+    mode: "0750"
+  loop:
+    - "{{ etcd_data_dir }}"
+    - "{{ etcd_log_dir | default('') }}"
+    - "{{ etcd_wal_dir | default('') }}"
+  when: item | length > 0
+
+- name: Ensure etcd directories exist (config/pki/backup)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ etcd_conf_dir }}", owner: "root", group: "root", mode: "0755" }
+    - { path: "{{ etcd_pki_dir }}", owner: "root", group: "{{ etcd_group }}", mode: "0750" }
+    - { path: "{{ etcd_backup_dir }}", owner: "root", group: "root", mode: "0750" }
+
+# wal-dir 已在上面统一创建，无需重复
+
+- name: Set tarball path on remote
+  ansible.builtin.set_fact:
+    _etcd_tarball_remote: "/tmp/{{ etcd_release_filename }}"
+
+- name: Download etcd tarball (online)
+  ansible.builtin.get_url:
+    url: "{{ etcd_download_url }}"
+    dest: "{{ _etcd_tarball_remote }}"
+    mode: "0644"
+    checksum: "{{ (etcd_download_sha256 | length > 0) | ternary('sha256:' ~ etcd_download_sha256, omit) }}"
+  when: etcd_install_mode == 'online'
+
+- name: Copy etcd tarball (offline)
+  ansible.builtin.copy:
+    src: "{{ etcd_offline_tarball }}"
+    dest: "{{ _etcd_tarball_remote }}"
+    mode: "0644"
+  when: etcd_install_mode == 'offline'
+
+- name: Unarchive etcd tarball
+  ansible.builtin.unarchive:
+    src: "{{ _etcd_tarball_remote }}"
+    dest: "/tmp"
+    remote_src: true
+    creates: "/tmp/etcd-v{{ etcd_version }}-linux-{{ etcd_arch }}/etcd"
+
+- name: Install etcd binaries
+  ansible.builtin.copy:
+    src: "/tmp/etcd-v{{ etcd_version }}-linux-{{ etcd_arch }}/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - etcd
+    - etcdctl
+    - etcdutl

@@ -1,0 +1,19 @@
+{{ etcd_log_file }} {
+  {{ etcd_logrotate_frequency }}
+  rotate {{ etcd_logrotate_rotate }}
+  missingok
+  notifempty
+{% if etcd_logrotate_copytruncate | bool %}
+  copytruncate
+{% else %}
+  # 注意：不启用 copytruncate 时，需要 etcd 支持重新打开日志文件，否则可能继续写入已轮转的旧文件
+  create 0640 {{ etcd_user }} {{ etcd_group }}
+{% endif %}
+{% if etcd_logrotate_compress | bool %}
+  compress
+  delaycompress
+{% endif %}
+{% if etcd_logrotate_maxsize is defined and (etcd_logrotate_maxsize | length) > 0 %}
+  maxsize {{ etcd_logrotate_maxsize }}
+{% endif %}
+}

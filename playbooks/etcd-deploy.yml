@@ -1,0 +1,17 @@
+---
+- name: Deploy etcd cluster
+  hosts: etcd
+  become: true
+  gather_facts: true
+  serial: 0
+
+  pre_tasks:
+    - name: Show target hosts
+      ansible.builtin.debug:
+        var: groups['etcd']
+
+  roles:
+    - role: etcd_pki
+      when: etcd_pki_mode | default('byo') == 'auto'
+    - role: etcd
+

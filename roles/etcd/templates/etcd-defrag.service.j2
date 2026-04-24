@@ -1,0 +1,16 @@
+[Unit]
+Description=etcd defrag (maintenance)
+After=network-online.target etcd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile={{ etcd_conf_dir }}/etcd.env
+{% if etcd_systemd_maintenance_hardening_enabled | bool %}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths={{ etcd_data_dir }} {{ etcd_conf_dir }} {{ etcd_log_dir }} /tmp
+{% endif %}
+ExecStart=/usr/local/sbin/etcd-defrag.sh

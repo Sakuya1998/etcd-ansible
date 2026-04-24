@@ -1,0 +1,213 @@
+---
+# 证书轮转（auto CA 模式）
+# - 默认只轮转 leaf 证书（server/peer/client），复用现有 CA
+# - 如需轮转 CA，请设置 etcd_pki_rotate_ca=true，并自行评估“阶段性信任链切换”方案（生产慎用）
+
+- name: Ensure auto mode
+  ansible.builtin.assert:
+    that:
+      - etcd_pki_mode == 'auto'
+    fail_msg: "rotate 仅支持 etcd_pki_mode=auto（BYO 请自行签发后用 roles/etcd 分发）。"
+
+- name: Ensure local PKI workdir exists
+  ansible.builtin.file:
+    path: "{{ etcd_pki_workdir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+
+- name: Ensure local PKI workdir permissions are strict
+  ansible.builtin.stat:
+    path: "{{ etcd_pki_workdir }}"
+  delegate_to: localhost
+  run_once: true
+  register: _pki_workdir_stat
+
+- name: Fail when local PKI workdir mode is not 0700
+  ansible.builtin.fail:
+    msg: "PKI 工作目录权限不符合要求：{{ etcd_pki_workdir }} 当前mode={{ _pki_workdir_stat.stat.mode }}，应为0700。"
+  when: _pki_workdir_stat.stat.mode != "0700"
+  delegate_to: localhost
+  run_once: true
+
+- name: Rotate CA when requested (localhost)
+  when: etcd_pki_rotate_ca | default(false) | bool
+  delegate_to: localhost
+  run_once: true
+  block:
+    - community.crypto.openssl_privatekey:
+        path: "{{ etcd_pki_workdir }}/ca.key"
+        size: 4096
+        type: RSA
+        mode: "0600"
+        force: true
+    - community.crypto.x509_certificate:
+        path: "{{ etcd_pki_workdir }}/ca.crt"
+        privatekey_path: "{{ etcd_pki_workdir }}/ca.key"
+        provider: selfsigned
+        subject:
+          commonName: "{{ etcd_cluster_name }}-ca"
+          organizationName: "{{ etcd_pki_org }}"
+        not_after: "+{{ etcd_pki_valid_days }}d"
+        mode: "0644"
+
+- name: Ensure CA exists (localhost)
+  delegate_to: localhost
+  run_once: true
+  block:
+    - ansible.builtin.stat:
+        path: "{{ etcd_pki_workdir }}/ca.crt"
+      register: _ca_crt
+    - ansible.builtin.fail:
+        msg: "未找到 CA：{{ etcd_pki_workdir }}/ca.crt。请先执行 roles/etcd_pki (auto) 初始化 CA，或启用 etcd_pki_rotate_ca=true。"
+      when: not _ca_crt.stat.exists
+
+- name: Ensure remote PKI dir exists
+  ansible.builtin.file:
+    path: "{{ etcd_pki_dir }}"
+    state: directory
+    owner: root
+    group: "{{ etcd_group | default('etcd') }}"
+    mode: "0750"
+
+- name: Copy CA cert to remote
+  ansible.builtin.copy:
+    src: "{{ etcd_pki_workdir }}/ca.crt"
+    dest: "{{ etcd_pki_dir }}/ca.crt.new"
+    owner: root
+    group: root
+    mode: "0644"
+  when: etcd_pki_rotate_ca | default(false) | bool
+
+- name: Atomic switch CA cert
+  ansible.builtin.command: >
+    bash -lc "if [ -f '{{ etcd_pki_dir }}/ca.crt.new' ]; then mv -f '{{ etcd_pki_dir }}/ca.crt.new' '{{ etcd_pki_dir }}/ca.crt'; fi"
+  changed_when: true
+  when: etcd_pki_rotate_ca | default(false) | bool
+
+- name: Build SANs for this host
+  ansible.builtin.set_fact:
+    _etcd_pki_sans: >-
+      {{
+        (['DNS:' ~ inventory_hostname] +
+         (ansible_host is defined and ansible_host | length > 0) | ternary(['IP:' ~ ansible_host], []) +
+         etcd_pki_extra_sans)
+      }}
+
+- name: Generate leaf keys/certs (localhost, force)
+  delegate_to: localhost
+  block:
+    - name: Generate server key
+      community.crypto.openssl_privatekey:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.key"
+        size: 2048
+        type: RSA
+        mode: "0600"
+        force: true
+
+    - name: Generate server CSR
+      community.crypto.openssl_csr:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.csr"
+        privatekey_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.key"
+        subject:
+          commonName: "{{ inventory_hostname }}"
+          organizationName: "{{ etcd_pki_org }}"
+        subject_alt_name: "{{ _etcd_pki_sans }}"
+
+    - name: Sign server cert with CA
+      community.crypto.x509_certificate:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.crt"
+        csr_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.csr"
+        provider: ownca
+        ownca_path: "{{ etcd_pki_workdir }}/ca.crt"
+        ownca_privatekey_path: "{{ etcd_pki_workdir }}/ca.key"
+        not_after: "+{{ etcd_pki_valid_days }}d"
+        mode: "0644"
+
+    - name: Generate peer key
+      community.crypto.openssl_privatekey:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.key"
+        size: 2048
+        type: RSA
+        mode: "0600"
+        force: true
+
+    - name: Generate peer CSR
+      community.crypto.openssl_csr:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.csr"
+        privatekey_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.key"
+        subject:
+          commonName: "{{ inventory_hostname }}-peer"
+          organizationName: "{{ etcd_pki_org }}"
+        subject_alt_name: "{{ _etcd_pki_sans }}"
+
+    - name: Sign peer cert with CA
+      community.crypto.x509_certificate:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.crt"
+        csr_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.csr"
+        provider: ownca
+        ownca_path: "{{ etcd_pki_workdir }}/ca.crt"
+        ownca_privatekey_path: "{{ etcd_pki_workdir }}/ca.key"
+        not_after: "+{{ etcd_pki_valid_days }}d"
+        mode: "0644"
+
+    - name: Generate client key
+      community.crypto.openssl_privatekey:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.key"
+        size: 2048
+        type: RSA
+        mode: "0600"
+        force: true
+
+    - name: Generate client CSR
+      community.crypto.openssl_csr:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.csr"
+        privatekey_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.key"
+        subject:
+          commonName: "{{ inventory_hostname }}-client"
+          organizationName: "{{ etcd_pki_org }}"
+
+    - name: Sign client cert with CA
+      community.crypto.x509_certificate:
+        path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.crt"
+        csr_path: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.csr"
+        provider: ownca
+        ownca_path: "{{ etcd_pki_workdir }}/ca.crt"
+        ownca_privatekey_path: "{{ etcd_pki_workdir }}/ca.key"
+        not_after: "+{{ etcd_pki_valid_days }}d"
+        mode: "0644"
+
+- name: Copy leaf certs and keys to remote (*.new)
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-{{ item.src }}"
+    dest: "{{ etcd_pki_dir }}/{{ item.dest }}.new"
+    owner: root
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: "server.crt", dest: "server.crt", mode: "0644", group: "root" }
+    - { src: "server.key", dest: "server.key", mode: "0640", group: "{{ etcd_group | default('etcd') }}" }
+    - { src: "peer.crt", dest: "peer.crt", mode: "0644", group: "root" }
+    - { src: "peer.key", dest: "peer.key", mode: "0640", group: "{{ etcd_group | default('etcd') }}" }
+    - { src: "client.crt", dest: "client.crt", mode: "0644", group: "root" }
+    - { src: "client.key", dest: "client.key", mode: "0640", group: "{{ etcd_group | default('etcd') }}" }
+
+- name: Atomic switch leaf certs and keys
+  ansible.builtin.command: >
+    bash -lc "for f in server.crt server.key peer.crt peer.key client.crt client.key; do
+      if [ -f '{{ etcd_pki_dir }}/'\"$f\"'.new' ]; then mv -f '{{ etcd_pki_dir }}/'\"$f\"'.new' '{{ etcd_pki_dir }}/'\"$f\"; fi;
+    done"
+  changed_when: true
+
+- name: Cleanup local PKI intermediate CSRs (optional)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  delegate_to: localhost
+  loop:
+    - "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-server.csr"
+    - "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-peer.csr"
+    - "{{ etcd_pki_workdir }}/{{ inventory_hostname }}-client.csr"
+  when: etcd_pki_cleanup | bool

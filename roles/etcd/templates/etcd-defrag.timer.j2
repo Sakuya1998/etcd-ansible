@@ -1,0 +1,11 @@
+[Unit]
+Description=Run etcd defrag periodically (staggered)
+
+[Timer]
+OnCalendar={{ etcd_defrag_on_calendar }}
+Persistent=true
+RandomizedDelaySec={{ etcd_defrag_random_delay_sec }}
+
+[Install]
+WantedBy=timers.target
+

@@ -1,0 +1,29 @@
+# Docker TLS 集成测试用变量（启用 TLS + auto PKI + 轮转）
+
+etcd_version: "3.5.0"
+etcd_install_mode: "online"
+
+etcd_tls_enabled: true
+etcd_pki_mode: "auto"
+
+# 轮转测试
+etcd_cert_rotate: true
+etcd_cert_force_rotate: true
+etcd_cert_rotate_mode: "hot_reload"
+
+# 测试期间不启用 timers（减少 systemd timer 干扰）
+etcd_snapshot_enabled: false
+etcd_defrag_enabled: false
+etcd_enable_timers: false
+
+# 目录约定（与生产保持一致）
+etcd_base_dir: /data/etcd
+etcd_data_dir: "{{ etcd_base_dir }}/data"
+etcd_wal_dir: "{{ etcd_base_dir }}/wal"
+etcd_conf_dir: "{{ etcd_base_dir }}/config"
+etcd_pki_dir: "{{ etcd_base_dir }}/pki"
+etcd_backup_dir: "{{ etcd_base_dir }}/backup"
+etcd_log_dir: "{{ etcd_base_dir }}/logs"
+
+etcd_log_outputs: "stderr,{{ etcd_log_dir }}/etcd.log"
+

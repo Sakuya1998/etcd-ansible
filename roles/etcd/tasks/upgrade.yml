@@ -1,0 +1,18 @@
+---
+# 节点级升级步骤（由 playbook 以 serial:1 控制滚动）
+- name: Stop etcd
+  ansible.builtin.systemd:
+    name: etcd
+    state: stopped
+
+- name: Re-install etcd binaries (same as install)
+  ansible.builtin.import_tasks: install.yml
+
+- name: Start etcd
+  ansible.builtin.systemd:
+    name: etcd
+    state: started
+
+- name: Health check after upgrade
+  ansible.builtin.import_tasks: health.yml
+

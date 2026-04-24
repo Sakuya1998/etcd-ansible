@@ -1,0 +1,10 @@
+[Unit]
+Description=Run etcd snapshot periodically
+
+[Timer]
+OnCalendar={{ etcd_snapshot_on_calendar }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

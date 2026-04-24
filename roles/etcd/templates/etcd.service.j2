@@ -1,0 +1,39 @@
+[Unit]
+Description=etcd key-value store
+Documentation=https://etcd.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User={{ etcd_user }}
+Group={{ etcd_group }}
+
+{% if etcd_systemd_hardening_enabled | bool %}
+NoNewPrivileges={{ etcd_systemd_no_new_privileges | bool | ternary('true','false') }}
+PrivateTmp={{ etcd_systemd_private_tmp | bool | ternary('true','false') }}
+ProtectHome={{ etcd_systemd_protect_home | bool | ternary('true','false') }}
+{% if etcd_systemd_protect_system != 'off' %}
+ProtectSystem={{ etcd_systemd_protect_system }}
+ReadWritePaths={{ etcd_systemd_read_write_paths }}
+{% endif %}
+ProtectKernelTunables={{ etcd_systemd_protect_kernel_tunables | bool | ternary('true','false') }}
+{% endif %}
+
+ExecStart=/usr/local/bin/etcd --config-file {{ etcd_conf_dir }}/etcd.conf.yml
+Restart=on-failure
+RestartSec=5s
+
+LimitNOFILE={{ etcd_systemd_limit_nofile }}
+LimitNPROC={{ etcd_systemd_limit_nproc }}
+TasksMax={{ etcd_systemd_tasks_max }}
+
+CPUAccounting={{ etcd_systemd_cpu_accounting | bool | ternary('true','false') }}
+MemoryAccounting={{ etcd_systemd_memory_accounting | bool | ternary('true','false') }}
+IOAccounting={{ etcd_systemd_io_accounting | bool | ternary('true','false') }}
+
+IOSchedulingClass={{ etcd_systemd_io_scheduling_class }}
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

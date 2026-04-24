@@ -1,0 +1,173 @@
+---
+- name: Create config dir
+  ansible.builtin.file:
+    path: "{{ etcd_conf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create PKI dir
+  ansible.builtin.file:
+    path: "{{ etcd_pki_dir }}"
+    state: directory
+    owner: root
+    group: "{{ etcd_group }}"
+    mode: "0750"
+
+- name: Deploy CA certificate (content)
+  ansible.builtin.copy:
+    content: "{{ etcd_ca_crt }}"
+    dest: "{{ etcd_pki_dir }}/ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - etcd_tls_enabled | bool
+    - etcd_ca_crt | length > 0
+
+- name: Deploy server certificate/key (content)
+  no_log: true
+  block:
+    - name: Deploy server cert
+      ansible.builtin.copy:
+        content: "{{ etcd_server_crt }}"
+        dest: "{{ etcd_pki_dir }}/server.crt"
+        owner: root
+        group: root
+        mode: "0644"
+      when: etcd_server_crt | length > 0
+
+    - name: Deploy server key
+      ansible.builtin.copy:
+        content: "{{ etcd_server_key }}"
+        dest: "{{ etcd_pki_dir }}/server.key"
+        owner: root
+        group: "{{ etcd_group }}"
+        mode: "0640"
+      when: etcd_server_key | length > 0
+  when: etcd_tls_enabled | bool
+
+- name: Deploy peer certificate/key (content)
+  no_log: true
+  block:
+    - name: Deploy peer cert
+      ansible.builtin.copy:
+        content: "{{ etcd_peer_crt }}"
+        dest: "{{ etcd_pki_dir }}/peer.crt"
+        owner: root
+        group: root
+        mode: "0644"
+      when: etcd_peer_crt | length > 0
+
+    - name: Deploy peer key
+      ansible.builtin.copy:
+        content: "{{ etcd_peer_key }}"
+        dest: "{{ etcd_pki_dir }}/peer.key"
+        owner: root
+        group: "{{ etcd_group }}"
+        mode: "0640"
+      when: etcd_peer_key | length > 0
+  when: etcd_tls_enabled | bool
+
+- name: Deploy client certificate/key for local etcdctl (content)
+  no_log: true
+  block:
+    - name: Deploy client cert
+      ansible.builtin.copy:
+        content: "{{ etcd_client_crt }}"
+        dest: "{{ etcd_pki_dir }}/client.crt"
+        owner: root
+        group: root
+        mode: "0644"
+      when: etcd_client_crt | length > 0
+
+    - name: Deploy client key
+      ansible.builtin.copy:
+        content: "{{ etcd_client_key }}"
+        dest: "{{ etcd_pki_dir }}/client.key"
+        owner: root
+        group: "{{ etcd_group }}"
+        mode: "0640"
+      when: etcd_client_key | length > 0
+  when: etcd_tls_enabled | bool
+
+- name: Verify TLS files exist (BYO or etcd_pki role output)
+  when: etcd_tls_enabled | bool
+  block:
+    - name: Stat required TLS files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: _etcd_tls_stats
+      loop:
+        - "{{ etcd_pki_dir }}/ca.crt"
+        - "{{ etcd_pki_dir }}/server.crt"
+        - "{{ etcd_pki_dir }}/server.key"
+        - "{{ etcd_pki_dir }}/peer.crt"
+        - "{{ etcd_pki_dir }}/peer.key"
+        - "{{ etcd_pki_dir }}/client.crt"
+        - "{{ etcd_pki_dir }}/client.key"
+
+    - name: Fail when any TLS file is missing
+      ansible.builtin.fail:
+        msg: "TLS 文件缺失：{{ item.item }}。请在 inventory 中提供对应内容（建议 ansible-vault），或使用 roles/etcd_pki 生成并分发。"
+      when: not item.stat.exists
+      loop: "{{ _etcd_tls_stats.results }}"
+
+    - name: Ensure etcd user can read key files
+      ansible.builtin.command: "test -r {{ item }}"
+      become_user: "{{ etcd_user }}"
+      changed_when: false
+      loop:
+        - "{{ etcd_pki_dir }}/server.key"
+        - "{{ etcd_pki_dir }}/peer.key"
+        - "{{ etcd_pki_dir }}/client.key"
+
+- name: Render etcd config file
+  ansible.builtin.template:
+    src: etcd.conf.yml.j2
+    dest: "{{ etcd_conf_dir }}/etcd.conf.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart etcd
+
+- name: Render etcd env file (for scripts)
+  ansible.builtin.template:
+    src: etcd.env.j2
+    dest: "{{ etcd_conf_dir }}/etcd.env"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure log directory exists when log-outputs includes file path
+  ansible.builtin.file:
+    path: "{{ (etcd_log_outputs.split(',') | select('search','/') | list | first | dirname) }}"
+    state: directory
+    owner: "{{ etcd_user }}"
+    group: "{{ etcd_group }}"
+    mode: "0750"
+  when:
+    - etcd_log_outputs is defined
+    - (etcd_log_outputs.split(',') | select('search','/') | list | length) > 0
+
+- name: Install logrotate when enabled and log-outputs includes file path
+  ansible.builtin.package:
+    name: logrotate
+    state: present
+  when:
+    - etcd_logrotate_enabled | bool
+    - etcd_log_outputs is defined
+    - (etcd_log_outputs.split(',') | select('search','/') | list | length) > 0
+
+- name: Install logrotate config for etcd
+  ansible.builtin.template:
+    src: etcd.logrotate.j2
+    dest: /etc/logrotate.d/etcd
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - etcd_logrotate_enabled | bool
+    - etcd_log_outputs is defined
+    - (etcd_log_outputs.split(',') | select('search','/') | list | length) > 0

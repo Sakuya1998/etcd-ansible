@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="{{ etcd_conf_dir }}/etcd.env"
+ENV_SNAPSHOT_FILE="{{ etcd_conf_dir }}/etcd-snapshot.env"
+BACKUP_DIR="{{ etcd_backup_dir }}"
+CLUSTER_NAME="{{ etcd_cluster_name }}"
+RETENTION_COUNT="{{ etcd_snapshot_retention_count }}"
+RETENTION_DAYS="{{ etcd_snapshot_retention_days }}"
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+if [[ -f "$ENV_SNAPSHOT_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_SNAPSHOT_FILE"
+fi
+
+mkdir -p "$BACKUP_DIR"
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+snap="${BACKUP_DIR}/snapshot-${CLUSTER_NAME}-${ts}.db"
+
+# 仅在本机为 leader 时执行快照（避免每个节点都生成冗余备份）
+if ! /usr/local/bin/etcdctl endpoint status -w json 2>/dev/null | grep -q '"IsLeader":true'; then
+  echo "[INFO] Not leader, skip snapshot."
+  exit 0
+fi
+
+echo "[INFO] Saving snapshot to ${snap}"
+/usr/local/bin/etcdctl snapshot save "${snap}"
+
+echo "[INFO] Snapshot status:"
+/usr/local/bin/etcdutl snapshot status "${snap}" -w table || true
+
+backend="${ETCD_SNAPSHOT_BACKEND:-none}"
+prefix="${ETCD_SNAPSHOT_PREFIX:-}"
+if [[ -n "$prefix" && "${prefix: -1}" != "/" ]]; then
+  prefix="${prefix}/"
+fi
+
+sha_file="${snap}.sha256"
+sha256sum "${snap}" > "${sha_file}"
+
+case "$backend" in
+  none|"")
+    echo "[INFO] No remote backend configured (ETCD_SNAPSHOT_BACKEND=none)."
+    ;;
+  s3)
+    if [[ -z "${ETCD_SNAPSHOT_S3_BUCKET:-}" ]]; then
+      echo "[ERROR] ETCD_SNAPSHOT_S3_BUCKET is empty" >&2
+      exit 2
+    fi
+    dest="s3://${ETCD_SNAPSHOT_S3_BUCKET}/${prefix}$(basename "${snap}")"
+    echo "[INFO] Uploading snapshot to ${dest}"
+    extra=()
+    [[ -n "${ETCD_SNAPSHOT_S3_ENDPOINT_URL:-}" ]] && extra+=(--endpoint-url "${ETCD_SNAPSHOT_S3_ENDPOINT_URL}")
+    [[ -n "${ETCD_SNAPSHOT_S3_REGION:-}" ]] && extra+=(--region "${ETCD_SNAPSHOT_S3_REGION}")
+    aws "${extra[@]}" s3 cp "${snap}" "${dest}"
+    aws "${extra[@]}" s3 cp "${sha_file}" "${dest}.sha256"
+    ;;
+  oss)
+    if [[ -z "${ETCD_SNAPSHOT_OSS_BUCKET:-}" || -z "${ETCD_SNAPSHOT_OSS_ENDPOINT:-}" || -z "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_ID:-}" || -z "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_SECRET:-}" ]]; then
+      echo "[ERROR] OSS variables are incomplete. Need bucket/endpoint/ak/sk" >&2
+      exit 2
+    fi
+    dest="oss://${ETCD_SNAPSHOT_OSS_BUCKET}/${prefix}$(basename "${snap}")"
+    echo "[INFO] Uploading snapshot to ${dest}"
+    ossutil cp -f -i "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_ID}" -k "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_SECRET}" -e "${ETCD_SNAPSHOT_OSS_ENDPOINT}" "${snap}" "${dest}"
+    ossutil cp -f -i "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_ID}" -k "${ETCD_SNAPSHOT_OSS_ACCESS_KEY_SECRET}" -e "${ETCD_SNAPSHOT_OSS_ENDPOINT}" "${sha_file}" "${dest}.sha256"
+    ;;
+  nfs)
+    if [[ -z "${ETCD_SNAPSHOT_NFS_DIR:-}" ]]; then
+      echo "[ERROR] ETCD_SNAPSHOT_NFS_DIR is empty" >&2
+      exit 2
+    fi
+    mkdir -p "${ETCD_SNAPSHOT_NFS_DIR}"
+    echo "[INFO] Copying snapshot to NFS dir ${ETCD_SNAPSHOT_NFS_DIR}"
+    cp -f "${snap}" "${ETCD_SNAPSHOT_NFS_DIR}/"
+    cp -f "${sha_file}" "${ETCD_SNAPSHOT_NFS_DIR}/"
+    ;;
+  *)
+    echo "[ERROR] Unknown ETCD_SNAPSHOT_BACKEND=${backend}" >&2
+    exit 2
+    ;;
+esac
+
+# 保留策略：按天
+if [[ "${RETENTION_DAYS}" != "0" ]]; then
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "snapshot-${CLUSTER_NAME}-*.db" -mtime +"${RETENTION_DAYS}" -print -delete || true
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "snapshot-${CLUSTER_NAME}-*.db.sha256" -mtime +"${RETENTION_DAYS}" -print -delete || true
+fi
+
+# 保留策略：按数量
+if [[ "${RETENTION_COUNT}" != "0" ]]; then
+  mapfile -t files < <(ls -1t "$BACKUP_DIR"/snapshot-"${CLUSTER_NAME}"-*.db 2>/dev/null || true)
+  if (( ${#files[@]} > RETENTION_COUNT )); then
+    for ((i=RETENTION_COUNT; i<${#files[@]}; i++)); do
+      rm -f "${files[$i]}" "${files[$i]}.sha256" || true
+    done
+  fi
+fi

@@ -1,0 +1,20 @@
+# etcd PKI 策略：
+# - byo：你自备证书/私钥（推荐企业生产）；本 role 不做任何事
+# - auto：在 Ansible 控制端自动生成 CA，并为每节点签发 server/peer/client 证书（依赖 community.crypto）
+
+etcd_pki_mode: "byo" # byo|auto
+
+etcd_pki_dir: /data/etcd/pki
+etcd_cluster_name: "prod-etcd"
+
+# 控制端（localhost）PKI 工作目录：不建议使用 /tmp（易被清理/权限不可控）
+etcd_pki_base_dir: "/root/.ansible/etcd-pki"
+etcd_pki_workdir: "{{ etcd_pki_base_dir }}/{{ etcd_cluster_name }}"
+etcd_pki_org: "etcd"
+etcd_pki_valid_days: 3650
+
+# 是否清理中间产物（默认不清理，便于审计与故障排查）
+etcd_pki_cleanup: false
+
+# 额外 SAN（按需在 host_vars/group_vars 添加）
+etcd_pki_extra_sans: []

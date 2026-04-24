@@ -1,0 +1,133 @@
+---
+# 扩容/新增节点：etcdctl member add + 新节点以 existing 启动加入集群
+
+- name: Preflight for member add
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_admin_host: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+
+  tasks:
+    - name: Require etcd_new_members
+      ansible.builtin.assert:
+        that:
+          - etcd_new_members is defined
+          - etcd_new_members | length > 0
+        fail_msg: "请通过 --extra-vars 传入 etcd_new_members（inventory hostname 列表）。例如：--extra-vars 'etcd_new_members=[\"etcd-4\",\"etcd-5\"]'"
+      run_once: true
+
+    - name: Ensure new members exist in inventory
+      ansible.builtin.assert:
+        that:
+          - item in hostvars
+        fail_msg: "新节点 {{ item }} 不在 inventory 中。请先把它加入 inventories/*/hosts.yml 并确保可 SSH。"
+      loop: "{{ etcd_new_members }}"
+      run_once: true
+
+    - name: Show admin host
+      ansible.builtin.debug:
+        msg: "admin host = {{ etcd_admin_host }}"
+      run_once: true
+
+- name: Member add on admin host (run_once)
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Get existing members (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_list_json
+      changed_when: false
+
+    - name: Build existing member name set
+      ansible.builtin.set_fact:
+        _existing_member_names: "{{ (_member_list_json.stdout | from_json) | map(attribute='name') | list }}"
+
+    - name: Skip members that already exist
+      ansible.builtin.debug:
+        msg: "member {{ item }} 已存在于集群，跳过 member add。"
+      loop: "{{ etcd_new_members }}"
+      when: item in _existing_member_names
+
+    - name: Add member and capture ETCD_INITIAL_CLUSTER
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member add {{ item }}
+        --peer-urls={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://{{ hostvars[item][etcd_node_address_var] | default(hostvars[item]['ansible_host'] | default(item)) }}:{{ etcd_peer_port }}
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_add_results
+      loop: "{{ etcd_new_members }}"
+      when: item not in _existing_member_names
+
+    - name: Add dynamic hosts group etcd_new_joiners with injected initial-cluster
+      ansible.builtin.add_host:
+        name: "{{ item.item }}"
+        groups: "etcd_new_joiners"
+        etcd_initial_cluster_state: "existing"
+        etcd_initial_cluster: "{{ (item.stdout | regex_search('ETCD_INITIAL_CLUSTER=\"([^\"]+)\"', '\\\\1')) }}"
+      loop: "{{ _member_add_results.results | default([]) }}"
+
+- name: Start new members (serial join)
+  hosts: etcd_new_joiners
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Deploy etcd on new member
+      ansible.builtin.include_role:
+        name: etcd
+
+    - name: Mark initialized (for operational guard)
+      ansible.builtin.file:
+        path: "{{ etcd_data_dir }}/.initialized"
+        state: touch
+        owner: "{{ etcd_user | default('etcd') }}"
+        group: "{{ etcd_group | default('etcd') }}"
+        mode: "0640"
+
+- name: Final validation (cluster)
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Member list
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w table
+      environment:
+        ETCDCTL_API: "3"
+      changed_when: false
+
+    - name: Endpoint health (cluster)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint health --cluster
+      environment:
+        ETCDCTL_API: "3"
+      changed_when: false

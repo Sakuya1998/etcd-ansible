@@ -1,0 +1,78 @@
+services:
+  ansible:
+    build:
+      context: .
+      dockerfile: docker/ansible/Dockerfile
+    container_name: solo-ansible
+    working_dir: /repo
+    volumes:
+      - ./:/repo
+    networks:
+      - etcdnet
+    command: ["bash", "-lc", "sleep infinity"]
+
+  etcd1:
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    container_name: solo-etcd1
+    hostname: etcd1
+    privileged: true
+    environment:
+      - container=docker
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - etcd1-data:/data
+    networks:
+      - etcdnet
+    command: ["/sbin/init"]
+
+  etcd2:
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    container_name: solo-etcd2
+    hostname: etcd2
+    privileged: true
+    environment:
+      - container=docker
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - etcd2-data:/data
+    networks:
+      - etcdnet
+    command: ["/sbin/init"]
+
+  etcd3:
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    container_name: solo-etcd3
+    hostname: etcd3
+    privileged: true
+    environment:
+      - container=docker
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - etcd3-data:/data
+    networks:
+      - etcdnet
+    command: ["/sbin/init"]
+
+networks:
+  etcdnet:
+    driver: bridge
+
+volumes:
+  etcd1-data:
+  etcd2-data:
+  etcd3-data:

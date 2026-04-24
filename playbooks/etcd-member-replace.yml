@@ -1,0 +1,198 @@
+---
+# 替换节点：
+# - 默认（更安全）：add 新节点 → 稳定 → remove 旧节点
+# - reuse_name=true：用于“旧节点已故障/不可达，但希望复用同一个 member name”的场景：
+#   先 member remove（不尝试 stop 旧节点）→ 再 member add（同名）→ 新节点以 existing 启动加入
+
+- name: Preflight for member replace
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_admin_host: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+    etcd_replace_reuse_name: "{{ etcd_replace_reuse_name | default(false) }}"
+
+  tasks:
+    - name: Require etcd_old_member and etcd_new_member
+      ansible.builtin.assert:
+        that:
+          - etcd_old_member is defined
+          - etcd_new_member is defined
+          - etcd_old_member | length > 0
+          - etcd_new_member | length > 0
+        fail_msg: "请通过 --extra-vars 传入 etcd_old_member 与 etcd_new_member。"
+      run_once: true
+
+    - name: Ensure inventory has old/new members
+      ansible.builtin.assert:
+        that:
+          - etcd_old_member in hostvars
+          - etcd_new_member in hostvars
+        fail_msg: "old/new member 必须都在 inventory 中（old={{ etcd_old_member }}, new={{ etcd_new_member }}）。"
+      run_once: true
+
+    - name: For reuse_name mode, require old==new (inventory points to new machine)
+      ansible.builtin.assert:
+        that:
+          - (not (etcd_replace_reuse_name | bool)) or (etcd_old_member == etcd_new_member)
+        fail_msg: "reuse_name=true 时必须满足 etcd_old_member==etcd_new_member（先更新 inventory 指向新机器，再执行 remove+add 同名）。"
+      run_once: true
+
+    - name: Show replace mode
+      ansible.builtin.debug:
+        msg:
+          admin: "{{ etcd_admin_host }}"
+          reuse_name: "{{ etcd_replace_reuse_name }}"
+          old: "{{ etcd_old_member }}"
+          new: "{{ etcd_new_member }}"
+      run_once: true
+
+- name: Stop old etcd (only when old host is reachable and not reuse_name)
+  hosts: "{{ etcd_old_member }}"
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Stop etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: stopped
+      when: not (etcd_replace_reuse_name | bool)
+
+- name: Remove old member from cluster (admin host)
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get member list (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_list_json
+      changed_when: false
+
+    - name: Build name->id map
+      ansible.builtin.set_fact:
+        _member_name_id_map: >-
+          {%- set m = {} -%}
+          {%- for it in (_member_list_json.stdout | from_json) -%}
+          {%- set _ = m.update({ it.name: it.ID }) -%}
+          {%- endfor -%}
+          {{ m }}
+
+    - name: Check whether old member exists
+      ansible.builtin.set_fact:
+        _old_member_exists: "{{ _member_name_id_map[etcd_old_member] is defined }}"
+
+    - name: Skip remove when old member not in member list
+      ansible.builtin.debug:
+        msg: "old member={{ etcd_old_member }} 不在当前 member list 中，视为已移除，跳过 member remove。"
+      when: not _old_member_exists
+
+    - name: Member remove old
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member remove {{ _member_name_id_map[etcd_old_member] }}
+      environment:
+        ETCDCTL_API: "3"
+      when: _old_member_exists
+
+- name: Add new member on admin host
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get member list (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_list_json2
+      changed_when: false
+
+    - name: Build existing member name set
+      ansible.builtin.set_fact:
+        _existing_member_names2: "{{ (_member_list_json2.stdout | from_json) | map(attribute='name') | list }}"
+
+    - name: Skip member add when new member already exists
+      ansible.builtin.debug:
+        msg: "new member={{ etcd_new_member }} 已存在于集群，跳过 member add（如需重建，请先 member remove）。"
+      when: etcd_new_member in _existing_member_names2
+
+    - name: Member add new (same name allowed when reuse_name=true)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member add {{ etcd_new_member }}
+        --peer-urls={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://{{ hostvars[etcd_new_member][etcd_node_address_var] | default(hostvars[etcd_new_member]['ansible_host'] | default(etcd_new_member)) }}:{{ etcd_peer_port }}
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_add_out
+      when: etcd_new_member not in _existing_member_names2
+
+    - name: Add dynamic host group for new joiner
+      ansible.builtin.add_host:
+        name: "{{ etcd_new_member }}"
+        groups: "etcd_replace_new_joiner"
+        etcd_initial_cluster_state: "existing"
+        etcd_initial_cluster: "{{ (_member_add_out.stdout | regex_search('ETCD_INITIAL_CLUSTER=\"([^\"]+)\"', '\\\\1')) }}"
+      when: etcd_new_member not in _existing_member_names2
+
+- name: Start new member (join)
+  hosts: etcd_replace_new_joiner
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    - name: Deploy etcd on new member
+      ansible.builtin.include_role:
+        name: etcd
+
+    - name: Mark initialized
+      ansible.builtin.file:
+        path: "{{ etcd_data_dir }}/.initialized"
+        state: touch
+        owner: "{{ etcd_user | default('etcd') }}"
+        group: "{{ etcd_group | default('etcd') }}"
+        mode: "0640"
+
+- name: Final validation (cluster)
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Endpoint health (cluster)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint health --cluster
+      environment:
+        ETCDCTL_API: "3"
+      changed_when: false

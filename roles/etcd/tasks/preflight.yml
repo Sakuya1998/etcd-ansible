@@ -1,0 +1,65 @@
+---
+- name: Ensure etcd group exists in inventory
+  ansible.builtin.assert:
+    that:
+      - groups['etcd'] is defined
+      - (groups['etcd'] | length) >= 1
+    fail_msg: "inventory 中必须存在 etcd 主机组，且至少包含 1 个节点。"
+
+- name: Validate etcd cluster size (odd number recommended)
+  when: etcd_enforce_odd_cluster_size | bool
+  ansible.builtin.assert:
+    that:
+      - (groups['etcd'] | length) % 2 == 1
+    fail_msg: "etcd 节点数建议为奇数（1/3/5/...）。当前 etcd 组数量={{ groups['etcd'] | length }}"
+
+- name: Warn when etcd cluster size is even
+  when: not (etcd_enforce_odd_cluster_size | bool) and ((groups['etcd'] | length) % 2 == 0)
+  ansible.builtin.debug:
+    msg: "警告：当前 etcd 节点数为偶数（{{ groups['etcd'] | length }}）。请确认这是扩/缩容过渡态，并确保 quorum 风险可控。"
+
+- name: Map CPU arch to etcd release arch
+  ansible.builtin.set_fact:
+    etcd_arch: >-
+      {{ (etcd_arch is defined and etcd_arch) |
+         ternary(etcd_arch,
+         (ansible_architecture in ['x86_64','amd64']) | ternary('amd64',
+         (ansible_architecture in ['aarch64','arm64']) | ternary('arm64','amd64'))) }}
+
+- name: Compute etcd release filename and download url
+  ansible.builtin.set_fact:
+    etcd_release_filename: "etcd-v{{ etcd_version }}-linux-{{ etcd_arch }}.tar.gz"
+    etcd_download_url: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-{{ etcd_arch }}.tar.gz"
+
+- name: Decide initial-cluster-state based on existing data-dir (only when not provided)
+  when: etcd_initial_cluster_state is not defined
+  block:
+    - name: Stat member dir
+      ansible.builtin.stat:
+        path: "{{ etcd_data_dir }}/member"
+      register: _etcd_member_dir
+
+    - name: Set initial-cluster-state (default)
+      ansible.builtin.set_fact:
+        etcd_initial_cluster_state: "{{ _etcd_member_dir.stat.exists | ternary('existing', 'new') }}"
+
+- name: Build initial-cluster string from inventory (only when not provided)
+  when: etcd_initial_cluster is not defined
+  ansible.builtin.set_fact:
+    etcd_initial_cluster: >-
+      {%- set pairs = [] -%}
+      {%- set proto = (etcd_tls_enabled | bool) | ternary('https','http') -%}
+      {%- for h in groups['etcd'] -%}
+      {%- set addr = (hostvars[h][etcd_node_address_var] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+      {%- set _ = pairs.append(h ~ '=' ~ proto ~ '://' ~ addr ~ ':' ~ etcd_peer_port) -%}
+      {%- endfor -%}
+      {{ pairs | join(',') }}
+
+- name: Build etcdctl endpoint and TLS args
+  ansible.builtin.set_fact:
+    etcdctl_endpoints: "{{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}"
+    etcdctl_tls_args: >-
+      {% if etcd_tls_enabled | bool -%}
+      --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+      {%- else -%}
+      {%- endif %}

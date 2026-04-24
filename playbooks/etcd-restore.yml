@@ -1,0 +1,98 @@
+---
+- name: Restore etcd from snapshot (DANGEROUS - stop cluster)
+  hosts: etcd
+  become: true
+  gather_facts: true
+  serial: 0
+
+  vars:
+    # 需要通过 --extra-vars 传入
+    # etcd_restore_snapshot: "/var/backups/etcd/snapshot-xxx.db"
+    i_know_restore_will_stop_etcd: false
+    # revision 风险控制（参考 etcd recovery 文档）
+    # bump > 0 时建议同时 mark-compacted=true，以终止旧 revision 的 watch 并避免 informer cache 问题
+    etcd_restore_bump_revision: 0
+    etcd_restore_mark_compacted: false
+
+  pre_tasks:
+    - name: Safety gate
+      ansible.builtin.assert:
+        that:
+          - i_know_restore_will_stop_etcd | bool
+          - etcd_restore_snapshot is defined
+          - etcd_restore_snapshot | length > 0
+        fail_msg: "恢复会停止 etcd 并重建数据目录。请使用 --extra-vars 'i_know_restore_will_stop_etcd=true etcd_restore_snapshot=/path/to/snapshot.db'"
+
+    - name: Validate bump-revision / mark-compacted combination
+      ansible.builtin.assert:
+        that:
+          - (etcd_restore_bump_revision | int == 0 and not (etcd_restore_mark_compacted | bool)) or (etcd_restore_bump_revision | int > 0 and (etcd_restore_mark_compacted | bool))
+        fail_msg: "参数组合非法：bump-revision>0 时必须 mark-compacted=true；bump-revision=0 时 mark-compacted 必须为 false。"
+
+    - name: Ensure snapshot file exists on each node
+      ansible.builtin.stat:
+        path: "{{ etcd_restore_snapshot }}"
+      register: _snap_stat
+
+    - name: Fail if snapshot missing
+      ansible.builtin.fail:
+        msg: "快照文件不存在：{{ etcd_restore_snapshot }}（需要在每个节点可访问）"
+      when: not _snap_stat.stat.exists
+
+    - name: Build initial-cluster string from inventory (for restore)
+      ansible.builtin.set_fact:
+        etcd_restore_initial_cluster: >-
+          {%- set pairs = [] -%}
+          {%- set proto = (etcd_tls_enabled | bool) | ternary('https','http') -%}
+          {%- for h in groups['etcd'] -%}
+          {%- set addr = (hostvars[h][etcd_node_address_var | default('ansible_host')] | default(hostvars[h]['ansible_host'] | default(h))) -%}
+          {%- set _ = pairs.append(h ~ '=' ~ proto ~ '://' ~ addr ~ ':' ~ etcd_peer_port) -%}
+          {%- endfor -%}
+          {{ pairs | join(',') }}
+
+  tasks:
+    - name: Stop etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: stopped
+
+    - name: Backup old data dir (if exists)
+      ansible.builtin.command: >
+        bash -lc "if [ -d '{{ etcd_data_dir }}' ]; then
+          ts=$(date -u +%Y%m%dT%H%M%SZ);
+          mv '{{ etcd_data_dir }}' '{{ etcd_data_dir }}.bak-${ts}';
+        fi"
+      changed_when: true
+
+    - name: Restore snapshot with etcdutl
+      ansible.builtin.command: >
+        /usr/local/bin/etcdutl snapshot restore {{ etcd_restore_snapshot }}
+        --name {{ inventory_hostname }}
+        --data-dir {{ etcd_data_dir }}
+        --initial-cluster "{{ etcd_restore_initial_cluster }}"
+        --initial-cluster-token "{{ etcd_initial_cluster_token }}"
+        --initial-advertise-peer-urls "{{ (etcd_tls_enabled | bool) | ternary('https','http') }}://{{ hostvars[inventory_hostname][etcd_node_address_var | default('ansible_host')] | default(ansible_host | default(inventory_hostname)) }}:{{ etcd_peer_port }}"
+        {% if (etcd_restore_bump_revision | int) > 0 -%}
+        --bump-revision {{ etcd_restore_bump_revision }}
+        --mark-compacted
+        {%- endif %}
+      environment:
+        ETCDCTL_API: "3"
+
+    - name: Fix ownership on data dir
+      ansible.builtin.file:
+        path: "{{ etcd_data_dir }}"
+        state: directory
+        owner: "{{ etcd_user | default('etcd') }}"
+        group: "{{ etcd_group | default('etcd') }}"
+        recurse: true
+
+    - name: Start etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: started
+
+    - name: Health check after restore
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: health.yml

@@ -1,0 +1,103 @@
+---
+# 缩容/移除节点：停止目标节点 etcd + etcdctl member remove
+
+- name: Preflight for member remove
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_admin_host: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+
+  tasks:
+    - name: Require etcd_remove_members
+      ansible.builtin.assert:
+        that:
+          - etcd_remove_members is defined
+          - etcd_remove_members | length > 0
+        fail_msg: "请通过 --extra-vars 传入 etcd_remove_members（inventory hostname 列表）。例如：--extra-vars 'etcd_remove_members=[\"etcd-4\"]'"
+      run_once: true
+
+    - name: Ensure remove members exist in inventory
+      ansible.builtin.assert:
+        that:
+          - item in hostvars
+        fail_msg: "待移除节点 {{ item }} 不在 inventory 中。"
+      loop: "{{ etcd_remove_members }}"
+      run_once: true
+
+- name: Stop etcd service on members to be removed
+  hosts: "{{ etcd_remove_members }}"
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Stop etcd
+      ansible.builtin.systemd:
+        name: etcd
+        state: stopped
+
+- name: Remove member from cluster (run_once on admin host)
+  hosts: "{{ etcd_admin_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get member list (json)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w json
+      environment:
+        ETCDCTL_API: "3"
+      register: _member_list_json
+      changed_when: false
+
+    - name: Build name->id map
+      ansible.builtin.set_fact:
+        _member_name_id_map: >-
+          {%- set m = {} -%}
+          {%- for it in (_member_list_json.stdout | from_json) -%}
+          {%- set _ = m.update({ it.name: it.ID }) -%}
+          {%- endfor -%}
+          {{ m }}
+
+    - name: Split remove targets (existing vs missing)
+      ansible.builtin.set_fact:
+        _remove_existing: "{{ etcd_remove_members | select('in', (_member_name_id_map.keys() | list)) | list }}"
+        _remove_missing: "{{ etcd_remove_members | reject('in', (_member_name_id_map.keys() | list)) | list }}"
+
+    - name: Skip members not found in member list
+      ansible.builtin.debug:
+        msg: "member {{ item }} 不在当前 member list 中，视为已移除，跳过 member remove。"
+      loop: "{{ _remove_missing }}"
+      when: _remove_missing | length > 0
+
+    - name: Member remove
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member remove {{ _member_name_id_map[item] }}
+      environment:
+        ETCDCTL_API: "3"
+      loop: "{{ _remove_existing }}"
+      when: _remove_existing | length > 0
+
+    - name: Final validation
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint health --cluster
+      environment:
+        ETCDCTL_API: "3"
+      changed_when: false

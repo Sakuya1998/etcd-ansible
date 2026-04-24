@@ -1,0 +1,103 @@
+# etcd v3.5 生产默认配置（请按你的环境修改）
+
+# -------- 版本/安装源 --------
+etcd_version: "3.5.0"
+etcd_install_mode: "online" # online|offline
+
+# 在线安装：建议填写 checksum（sha256）以确保供应链安全
+# 示例：etcd_download_sha256: "xxxx..."
+etcd_download_sha256: ""
+
+# 离线安装：把对应 tarball 放到 roles/etcd/files/ 下
+etcd_offline_tarball: "etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+
+# -------- 集群标识 --------
+etcd_cluster_name: "prod-etcd"
+etcd_initial_cluster_token: "etcd-cluster-1"
+
+# -------- 端口/地址 --------
+etcd_peer_port: 2380
+etcd_client_port: 2379
+etcd_metrics_port: 2381
+etcd_metrics_listen_urls: "{{ (etcd_tls_enabled | bool) | ternary('https','http') }}://0.0.0.0:{{ etcd_metrics_port }}"
+
+# -------- 目录（按需求统一 /data/etcd）--------
+etcd_base_dir: /data/etcd
+etcd_data_dir: "{{ etcd_base_dir }}/data"
+etcd_wal_dir: "{{ etcd_base_dir }}/wal"
+etcd_conf_dir: "{{ etcd_base_dir }}/config"
+etcd_pki_dir: "{{ etcd_base_dir }}/pki"
+etcd_backup_dir: "{{ etcd_base_dir }}/backup"
+
+# -------- TLS（生产建议始终启用）--------
+etcd_tls_enabled: true
+
+# BYO（默认）：你自行准备 CA/证书/私钥；Ansible 仅负责分发到 etcd_pki_dir
+etcd_pki_mode: "byo" # byo|auto
+
+etcd_client_cert_auth: true
+etcd_peer_client_cert_auth: true
+
+# BYO 场景的证书内容（推荐用 ansible-vault 管理）
+# 你也可以在 host_vars 里按节点覆写（例如每节点独立 server/peer 证书）
+etcd_ca_crt: ""
+etcd_server_crt: ""
+etcd_server_key: ""
+etcd_peer_crt: ""
+etcd_peer_key: ""
+etcd_client_crt: ""
+etcd_client_key: ""
+
+# -------- TLS 轮转（手动触发 playbooks/etcd-cert-rotate.yml）--------
+etcd_cert_rotate: false
+etcd_cert_force_rotate: false
+etcd_cert_min_remaining_days: 30
+etcd_cert_rotate_mode: "hot_reload" # hot_reload|rolling_restart
+
+# -------- 自动 compaction（建议启用）--------
+etcd_auto_compaction_mode: "periodic" # periodic|revision
+etcd_auto_compaction_retention: "72h"
+
+# -------- 常用生产参数（按需覆盖）--------
+etcd_logger: "zap"
+etcd_log_level: "info"
+etcd_log_dir: "{{ etcd_base_dir }}/logs"
+etcd_log_file: "{{ etcd_log_dir }}/etcd.log"
+etcd_log_outputs: "stderr,{{ etcd_log_file }}"
+
+# etcd backend 配额（默认 2GiB）；如果 DB 增长较快、value 较大，可考虑提升
+etcd_quota_backend_bytes: 2147483648
+
+# -------- 备份（snapshot save）--------
+etcd_snapshot_enabled: true
+etcd_snapshot_on_calendar: "hourly" # systemd OnCalendar，例如 hourly/daily/weekly 或 "*-*-* 02:00:00"
+etcd_snapshot_retention_count: 48
+etcd_snapshot_retention_days: 0 # 0 表示不按天保留
+
+# snapshot 远端持久化：none|s3|oss|nfs
+etcd_snapshot_backend: "none"
+etcd_snapshot_prefix: "etcd/"
+
+# S3/MinIO（建议用 ansible-vault 管理）
+etcd_snapshot_s3_bucket: ""
+etcd_snapshot_s3_endpoint_url: ""   # MinIO 常用，例如 https://minio.example.com
+etcd_snapshot_s3_region: ""
+etcd_snapshot_s3_access_key_id: ""
+etcd_snapshot_s3_secret_access_key: ""
+
+# OSS（建议用 ansible-vault 管理）
+etcd_snapshot_oss_bucket: ""
+etcd_snapshot_oss_endpoint: ""      # 例如 https://oss-cn-hangzhou.aliyuncs.com
+etcd_snapshot_oss_access_key_id: ""
+etcd_snapshot_oss_access_key_secret: ""
+
+# NFS：可选挂载点（挂载后你也可以把 etcd_backup_dir 指向该目录）
+etcd_snapshot_nfs_server: ""
+etcd_snapshot_nfs_export: ""
+etcd_snapshot_nfs_mountpoint: ""
+etcd_snapshot_nfs_dir: ""           # 不挂载时可用：脚本将快照复制到该目录（目录需已可访问）
+
+# -------- defrag（串行/错峰）--------
+etcd_defrag_enabled: true
+etcd_defrag_on_calendar: "weekly"
+etcd_defrag_random_delay_sec: 3600

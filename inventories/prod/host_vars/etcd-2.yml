@@ -1,0 +1,6 @@
+# 示例：每节点独立证书（BYO），可用 ansible-vault 加密
+etcd_server_crt: ""
+etcd_server_key: ""
+etcd_peer_crt: ""
+etcd_peer_key: ""
+

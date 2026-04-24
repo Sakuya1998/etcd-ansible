@@ -1,0 +1,25 @@
+# Docker 集成测试用变量（尽量减少外部依赖）
+
+etcd_version: "3.5.0"
+etcd_install_mode: "online"
+
+# 测试环境先关闭 TLS（避免证书准备复杂度）
+etcd_tls_enabled: false
+etcd_pki_mode: "byo"
+
+# 测试期间不启用 timers（减少 systemd timer 干扰）
+etcd_snapshot_enabled: true
+etcd_defrag_enabled: false
+etcd_enable_timers: false
+
+# 目录约定（与生产保持一致）
+etcd_base_dir: /data/etcd
+etcd_data_dir: "{{ etcd_base_dir }}/data"
+etcd_wal_dir: "{{ etcd_base_dir }}/wal"
+etcd_conf_dir: "{{ etcd_base_dir }}/config"
+etcd_pki_dir: "{{ etcd_base_dir }}/pki"
+etcd_backup_dir: "{{ etcd_base_dir }}/backup"
+etcd_log_dir: "{{ etcd_base_dir }}/logs"
+
+# 日志（测试仍写到文件，方便 docker exec 查看）
+etcd_log_outputs: "stderr,{{ etcd_log_dir }}/etcd.log"

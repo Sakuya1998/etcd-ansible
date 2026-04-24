@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: etcd-alerts
+  labels:
+    app: etcd
+spec:
+  groups:
+    - name: etcd
+      rules:
+        - alert: etcdNoLeader
+          expr: etcd_server_has_leader{job=~".*etcd.*"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: etcd 集群无 leader
+            description: 'etcd cluster "{{ $labels.job }}": member {{ $labels.instance }} has no leader.'
+            runbook_url: https://monitoring.mixins.dev/etcd/#alerts
+        - alert: etcdHighFsyncDurations
+          expr: histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket{job=~".*etcd.*"}[5m])) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: etcd WAL fsync 延迟过高（99th）
+            description: '99th percentile fsync durations are {{ $value }}s on {{ $labels.instance }}.'
+            runbook_url: https://runbooks.prometheus-operator.dev/runbooks/etcd/etcdhighfsyncdurations/
+

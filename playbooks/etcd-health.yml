@@ -1,0 +1,12 @@
+---
+- name: etcd health and status (per node local endpoint)
+  hosts: etcd
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Run health check tasks from role
+      ansible.builtin.include_role:
+        name: etcd
+        tasks_from: health.yml
+

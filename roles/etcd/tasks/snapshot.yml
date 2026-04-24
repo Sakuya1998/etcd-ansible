@@ -1,0 +1,149 @@
+---
+- name: Install snapshot script
+  ansible.builtin.template:
+    src: etcd-snapshot.sh.j2
+    dest: /usr/local/sbin/etcd-snapshot.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install snapshot env file (for remote backend credentials)
+  no_log: true
+  ansible.builtin.template:
+    src: etcd-snapshot.env.j2
+    dest: "{{ etcd_conf_dir }}/etcd-snapshot.env"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install dependencies for snapshot backend (S3)
+  when: etcd_snapshot_backend == 's3'
+  block:
+    - name: Ensure unzip is installed
+      ansible.builtin.package:
+        name: unzip
+        state: present
+
+    - name: Install awscli via official v2 bundle (recommended)
+      when: etcd_snapshot_s3_awscli_install_method == 'bundle'
+      block:
+        - name: Map awscli bundle arch
+          ansible.builtin.set_fact:
+            _awscli_arch: "{{ (etcd_arch == 'arm64') | ternary('aarch64', 'x86_64') }}"
+
+        - name: Download awscli v2 bundle
+          ansible.builtin.get_url:
+            url: "https://awscli.amazonaws.com/awscli-exe-linux-{{ _awscli_arch }}.zip"
+            dest: "/tmp/awscliv2.zip"
+            mode: "0644"
+            checksum: "{{ (etcd_snapshot_s3_awscli_bundle_sha256 | length > 0) | ternary('sha256:' ~ etcd_snapshot_s3_awscli_bundle_sha256, omit) }}"
+
+        - name: Unarchive awscli bundle
+          ansible.builtin.unarchive:
+            src: "/tmp/awscliv2.zip"
+            dest: "/tmp"
+            remote_src: true
+
+        - name: Install/Update awscli
+          ansible.builtin.command: >
+            /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+          changed_when: true
+
+    - name: Install awscli via OS package manager (fallback)
+      ansible.builtin.package:
+        name: awscli
+        state: present
+      when: etcd_snapshot_s3_awscli_install_method == 'package'
+
+    - name: Install awscli via pip (fallback)
+      ansible.builtin.pip:
+        name: awscli
+        state: present
+        extra_args: "--break-system-packages"
+      when: etcd_snapshot_s3_awscli_install_method == 'pip'
+
+- name: Install dependencies for snapshot backend (OSS)
+  when: etcd_snapshot_backend == 'oss'
+  block:
+    - name: Map ossutil arch and checksum
+      ansible.builtin.set_fact:
+        _ossutil_arch: "{{ (etcd_arch == 'arm64') | ternary('arm64', (etcd_arch == 'amd64') | ternary('amd64', 'amd64')) }}"
+        _ossutil_sha256_map:
+          amd64: "d4308515689144c6b213d4998787abbd232dd6714fc43dedbe87064c2c34dee1"
+          arm64: "dcadb6aa97ddbae523e427e9397a529a04c2f21b4204065ce30e21d44908faa0"
+
+    - name: Ensure unzip is installed
+      ansible.builtin.package:
+        name: unzip
+        state: present
+
+    - name: Download ossutil zip
+      ansible.builtin.get_url:
+        url: "https://gosspublic.alicdn.com/ossutil/v2/{{ etcd_ossutil_version }}/ossutil-{{ etcd_ossutil_version }}-linux-{{ _ossutil_arch }}.zip"
+        dest: "/tmp/ossutil-{{ etcd_ossutil_version }}.zip"
+        mode: "0644"
+        checksum: "sha256:{{ _ossutil_sha256_map[_ossutil_arch] }}"
+
+    - name: Unarchive ossutil zip
+      ansible.builtin.unarchive:
+        src: "/tmp/ossutil-{{ etcd_ossutil_version }}.zip"
+        dest: "/tmp"
+        remote_src: true
+
+    - name: Install ossutil binary
+      ansible.builtin.copy:
+        src: "/tmp/ossutil-{{ etcd_ossutil_version }}-linux-{{ _ossutil_arch }}/ossutil"
+        dest: "/usr/local/bin/ossutil"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+- name: Configure NFS mount (optional)
+  when: etcd_snapshot_backend == 'nfs' and (etcd_snapshot_nfs_mountpoint | length > 0)
+  block:
+    - name: Ensure mountpoint exists
+      ansible.builtin.file:
+        path: "{{ etcd_snapshot_nfs_mountpoint }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure NFS client package is installed (best-effort)
+      ansible.builtin.package:
+        name: "{{ (ansible_os_family == 'Debian') | ternary('nfs-common', 'nfs-utils') }}"
+        state: present
+
+    - name: Mount NFS
+      ansible.builtin.mount:
+        path: "{{ etcd_snapshot_nfs_mountpoint }}"
+        src: "{{ etcd_snapshot_nfs_server }}:{{ etcd_snapshot_nfs_export }}"
+        fstype: nfs
+        opts: "{{ etcd_snapshot_nfs_mount_opts }}"
+        state: mounted
+
+- name: Install snapshot systemd service
+  ansible.builtin.template:
+    src: etcd-snapshot.service.j2
+    dest: /etc/systemd/system/etcd-snapshot.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd daemon-reload
+
+- name: Install snapshot systemd timer
+  ansible.builtin.template:
+    src: etcd-snapshot.timer.j2
+    dest: /etc/systemd/system/etcd-snapshot.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd daemon-reload
+
+- name: Enable snapshot timer
+  ansible.builtin.systemd:
+    name: etcd-snapshot.timer
+    enabled: true
+    state: started
+  when: etcd_enable_timers | bool

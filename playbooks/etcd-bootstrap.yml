@@ -1,0 +1,218 @@
+---
+# 新集群 bootstrap（强烈推荐使用 member add 流程，避免一次性 bootstrap 脏集群风险）
+
+- name: Preflight for bootstrap
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_bootstrap_host: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+    etcd_bootstrap_lock_file: /var/lock/solo-etcd-bootstrap.lock
+    etcd_bootstrap_inprogress_file: /var/lock/solo-etcd-bootstrap.inprogress
+    etcd_bootstrap_allow_partial: false
+
+  tasks:
+    - name: Ensure bootstrap runs against full etcd group (no --limit partial)
+      ansible.builtin.assert:
+        that:
+          - etcd_bootstrap_allow_partial | bool or (ansible_play_hosts_all | length == groups['etcd'] | length)
+        fail_msg: "检测到本次执行可能使用了 --limit 导致只包含部分 etcd 节点。为避免脏集群，bootstrap 必须面向完整 etcd 组。"
+      run_once: true
+
+    - name: Show selected bootstrap host
+      ansible.builtin.debug:
+        msg: "bootstrap host = {{ etcd_bootstrap_host }}"
+      run_once: true
+
+    - name: Acquire bootstrap lock by atomically creating in-progress marker
+      ansible.builtin.command: >
+        bash -lc "set -euo pipefail;
+        mkdir -p \"$(dirname '{{ etcd_bootstrap_inprogress_file }}')\";
+        ( set -o noclobber; echo \"$(hostname) $(date -u +%Y%m%dT%H%M%SZ)\" > '{{ etcd_bootstrap_inprogress_file }}' )"
+      delegate_to: "{{ etcd_bootstrap_host }}"
+      run_once: true
+      changed_when: true
+
+- name: Bootstrap first node (single-member new)
+  hosts: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_bootstrap_host: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+    etcd_bootstrap_inprogress_file: /var/lock/solo-etcd-bootstrap.inprogress
+
+  tasks:
+    - name: Bootstrap node block (cleanup inprogress on failure)
+      block:
+        - name: Generate/distribute PKI (auto mode)
+          ansible.builtin.include_role:
+            name: etcd_pki
+          when: etcd_pki_mode | default('byo') == 'auto'
+
+        - name: Check initialized marker
+          ansible.builtin.stat:
+            path: "{{ etcd_data_dir }}/.initialized"
+          register: _init_marker
+
+        - name: Skip bootstrap when already initialized
+          ansible.builtin.debug:
+            msg: "检测到 {{ etcd_data_dir }}/.initialized，跳过 bootstrap（你可能需要执行成员管理 playbook）。"
+          when: _init_marker.stat.exists
+
+        - name: Set bootstrap initial cluster (self only)
+          ansible.builtin.set_fact:
+            etcd_initial_cluster_state: "new"
+            etcd_initial_cluster: >-
+              {{ inventory_hostname }}={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://{{ hostvars[inventory_hostname][etcd_node_address_var] | default(ansible_host | default(inventory_hostname)) }}:{{ etcd_peer_port }}
+          when: not _init_marker.stat.exists
+
+        - name: Deploy etcd on bootstrap node
+          ansible.builtin.include_role:
+            name: etcd
+          when: not _init_marker.stat.exists
+
+        - name: Mark initialized
+          ansible.builtin.file:
+            path: "{{ etcd_data_dir }}/.initialized"
+            state: touch
+            owner: "{{ etcd_user | default('etcd') }}"
+            group: "{{ etcd_group | default('etcd') }}"
+            mode: "0640"
+          when: not _init_marker.stat.exists
+      rescue:
+        - name: Remove bootstrap in-progress marker (best-effort)
+          ansible.builtin.file:
+            path: "{{ etcd_bootstrap_inprogress_file }}"
+            state: absent
+          delegate_to: "{{ etcd_bootstrap_host }}"
+          run_once: true
+          ignore_errors: true
+
+- name: Add other members via etcdctl member add (run on bootstrap host)
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  vars:
+    etcd_bootstrap_host: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+    etcd_bootstrap_inprogress_file: /var/lock/solo-etcd-bootstrap.inprogress
+
+  tasks:
+    - name: Member add block (cleanup inprogress on failure)
+      block:
+        - name: Build join list (excluding bootstrap host)
+          ansible.builtin.set_fact:
+            _join_members: "{{ groups['etcd'] | difference([etcd_bootstrap_host]) }}"
+          run_once: true
+
+        - name: Member add for joiners and capture ETCD_INITIAL_CLUSTER
+          ansible.builtin.command: >
+            /usr/local/bin/etcdctl
+            --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+            {% if etcd_tls_enabled | bool -%}
+            --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+            {%- endif %}
+            member add {{ item }}
+            --peer-urls={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://{{ hostvars[item][etcd_node_address_var] | default(hostvars[item]['ansible_host'] | default(item)) }}:{{ etcd_peer_port }}
+          environment:
+            ETCDCTL_API: "3"
+          register: _member_add_results
+          delegate_to: "{{ etcd_bootstrap_host }}"
+          run_once: true
+          loop: "{{ _join_members }}"
+          when: _join_members | length > 0
+
+        - name: Add dynamic hosts group etcd_joiners with injected initial-cluster
+          ansible.builtin.add_host:
+            name: "{{ item.item }}"
+            groups: "etcd_joiners"
+            etcd_initial_cluster_state: "existing"
+            etcd_initial_cluster: "{{ (item.stdout | regex_search('ETCD_INITIAL_CLUSTER=\"([^\"]+)\"', '\\\\1')) }}"
+          loop: "{{ _member_add_results.results | default([]) }}"
+          run_once: true
+          when: _join_members | length > 0
+      rescue:
+        - name: Remove bootstrap in-progress marker (best-effort)
+          ansible.builtin.file:
+            path: "{{ etcd_bootstrap_inprogress_file }}"
+            state: absent
+          delegate_to: "{{ etcd_bootstrap_host }}"
+          run_once: true
+          ignore_errors: true
+
+- name: Start joiner members (serial)
+  hosts: etcd_joiners
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    etcd_bootstrap_host: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+    etcd_bootstrap_inprogress_file: /var/lock/solo-etcd-bootstrap.inprogress
+
+  tasks:
+    - name: Joiner start block (cleanup inprogress on failure)
+      block:
+        - name: Generate/distribute PKI (auto mode)
+          ansible.builtin.include_role:
+            name: etcd_pki
+          when: etcd_pki_mode | default('byo') == 'auto'
+
+        - name: Deploy etcd on joiner node
+          ansible.builtin.include_role:
+            name: etcd
+      rescue:
+        - name: Remove bootstrap in-progress marker (best-effort)
+          ansible.builtin.file:
+            path: "{{ etcd_bootstrap_inprogress_file }}"
+            state: absent
+          delegate_to: "{{ etcd_bootstrap_host }}"
+          run_once: true
+          ignore_errors: true
+
+- name: Final cluster validation
+  hosts: etcd
+  become: true
+  gather_facts: false
+
+  vars:
+    etcd_bootstrap_host: "{{ etcd_bootstrap_host | default(groups['etcd'][0]) }}"
+    etcd_bootstrap_inprogress_file: /var/lock/solo-etcd-bootstrap.inprogress
+
+  tasks:
+    - name: Member list
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        member list -w table
+      environment:
+        ETCDCTL_API: "3"
+      delegate_to: "{{ etcd_bootstrap_host }}"
+      run_once: true
+      changed_when: false
+
+    - name: Endpoint health (cluster)
+      ansible.builtin.command: >
+        /usr/local/bin/etcdctl
+        --endpoints={{ (etcd_tls_enabled | bool) | ternary('https','http') }}://127.0.0.1:{{ etcd_client_port }}
+        {% if etcd_tls_enabled | bool -%}
+        --cacert {{ etcd_pki_dir }}/ca.crt --cert {{ etcd_pki_dir }}/client.crt --key {{ etcd_pki_dir }}/client.key
+        {%- endif %}
+        endpoint health --cluster
+      environment:
+        ETCDCTL_API: "3"
+      delegate_to: "{{ etcd_bootstrap_host }}"
+      run_once: true
+      changed_when: false
+
+    - name: Remove bootstrap in-progress marker
+      ansible.builtin.file:
+        path: "{{ etcd_bootstrap_inprogress_file }}"
+        state: absent
+      delegate_to: "{{ etcd_bootstrap_host }}"
+      run_once: true

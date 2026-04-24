@@ -1,0 +1,142 @@
+# etcd role 默认值（生产建议仍在 inventory 覆写关键变量）
+
+etcd_version: "3.5.0"
+etcd_install_mode: "online" # online|offline
+etcd_download_sha256: ""
+etcd_offline_tarball: "etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+
+etcd_user: etcd
+etcd_group: etcd
+
+etcd_cluster_name: "prod-etcd"
+etcd_initial_cluster_token: "etcd-cluster-1"
+
+etcd_peer_port: 2380
+etcd_client_port: 2379
+etcd_metrics_port: 2381
+etcd_metrics_listen_urls: "{{ (etcd_tls_enabled | bool) | ternary('https','http') }}://0.0.0.0:{{ etcd_metrics_port }}"
+
+# etcd 目录统一放在 /data/etcd（按需求）
+etcd_base_dir: /data/etcd
+etcd_data_dir: "{{ etcd_base_dir }}/data"
+etcd_wal_dir: "{{ etcd_base_dir }}/wal"
+etcd_conf_dir: "{{ etcd_base_dir }}/config"
+etcd_pki_dir: "{{ etcd_base_dir }}/pki"
+etcd_backup_dir: "{{ etcd_base_dir }}/backup"
+
+etcd_tls_enabled: true
+etcd_pki_mode: "byo" # byo|auto（auto 由 roles/etcd_pki 产出证书）
+etcd_client_cert_auth: true
+etcd_peer_client_cert_auth: true
+
+etcd_ca_crt: ""
+etcd_server_crt: ""
+etcd_server_key: ""
+etcd_peer_crt: ""
+etcd_peer_key: ""
+etcd_client_crt: ""
+etcd_client_key: ""
+
+# -------- TLS 轮转（由 playbooks/etcd-cert-rotate.yml 使用）--------
+etcd_cert_rotate: false
+etcd_cert_force_rotate: false
+etcd_cert_min_remaining_days: 30
+etcd_cert_rotate_mode: "hot_reload" # hot_reload|rolling_restart
+etcd_cert_rotate_scope: "all" # all|server|peer|client
+
+# 自动 compaction（etcd 自带能力）
+etcd_auto_compaction_mode: "periodic" # periodic|revision
+etcd_auto_compaction_retention: "72h"
+
+# -------- 常用生产参数（可按需覆盖）--------
+# 日志（建议默认走 journald：log-outputs=stderr）
+etcd_logger: "zap"          # zap|capnslog
+etcd_log_level: "info"      # debug|info|warn|error|panic|fatal
+etcd_log_dir: "{{ etcd_base_dir }}/logs"
+etcd_log_file: "{{ etcd_log_dir }}/etcd.log"
+etcd_log_outputs: "stderr,{{ etcd_log_file }}"  # 例如 "stderr" 或 "/data/etcd/log/etcd.log" 或 "stderr,/data/etcd/log/etcd.log"
+
+# logrotate（仅当 log-outputs 包含文件路径时安装配置）
+etcd_logrotate_enabled: true
+etcd_logrotate_rotate: 14
+etcd_logrotate_frequency: daily
+etcd_logrotate_compress: true
+etcd_logrotate_copytruncate: true
+etcd_logrotate_maxsize: "" # 可选，例如 "200M"；为空则不设置 maxsize
+
+# 存储与性能
+etcd_quota_backend_bytes: 2147483648  # 2GiB（etcd 默认值）；大集群可考虑提升（如 8GiB）
+etcd_max_request_bytes: 1572864       # 1.5MiB（etcd 默认值）
+etcd_snapshot_count: 10000            # 触发一次 snapshot 的事务数（默认 10000）
+etcd_heartbeat_interval: 100          # ms（默认 100）
+etcd_election_timeout: 1000           # ms（默认 1000）
+
+etcd_snapshot_enabled: true
+etcd_snapshot_on_calendar: "hourly"
+etcd_snapshot_retention_count: 48
+etcd_snapshot_retention_days: 0
+
+# -------- snapshot 远端持久化（none|s3|oss|nfs）--------
+etcd_snapshot_backend: "none"
+etcd_snapshot_prefix: "etcd/"
+
+# S3/MinIO（凭据建议用 ansible-vault 管理）
+etcd_snapshot_s3_bucket: ""
+etcd_snapshot_s3_endpoint_url: "" # MinIO 常用，例如 https://minio.example.com
+etcd_snapshot_s3_region: ""
+etcd_snapshot_s3_access_key_id: ""
+etcd_snapshot_s3_secret_access_key: ""
+
+# S3/MinIO 上传工具（awscli）安装方式：bundle|package|pip
+etcd_snapshot_s3_awscli_install_method: "bundle"
+etcd_snapshot_s3_awscli_bundle_sha256: "" # 可选：填写后启用校验
+
+# OSS（ossutil 2.x；下载链接与校验和来自阿里云文档）
+etcd_snapshot_oss_bucket: ""
+etcd_snapshot_oss_endpoint: "" # 例如 https://oss-cn-hangzhou.aliyuncs.com
+etcd_snapshot_oss_access_key_id: ""
+etcd_snapshot_oss_access_key_secret: ""
+etcd_ossutil_version: "2.2.2"
+
+# NFS（将快照复制到 NFS 目录；或直接把 etcd_backup_dir 指到 NFS 挂载点）
+etcd_snapshot_nfs_dir: ""
+etcd_snapshot_nfs_server: ""
+etcd_snapshot_nfs_export: ""
+etcd_snapshot_nfs_mountpoint: ""
+etcd_snapshot_nfs_mount_opts: "defaults"
+
+etcd_defrag_enabled: true
+etcd_defrag_on_calendar: "weekly"
+etcd_defrag_random_delay_sec: 3600
+
+# 额外：是否在部署后启用并启动 timer
+etcd_enable_timers: true
+
+# 是否强制 etcd 节点数为奇数（生产推荐奇数；扩/缩容演练时可临时关闭）
+etcd_enforce_odd_cluster_size: true
+
+# 计算初始集群时使用哪个 hostvar 作为节点地址
+# - ansible_host：通常为 IP
+# - inventory_hostname：通常为 DNS/主机名
+etcd_node_address_var: "ansible_host"
+
+# -------- systemd 资源/IO 控制（生产建议）--------
+etcd_systemd_limit_nofile: 65536
+etcd_systemd_limit_nproc: 65536
+etcd_systemd_tasks_max: 65536
+etcd_systemd_io_scheduling_class: "best-effort"
+etcd_systemd_cpu_accounting: true
+etcd_systemd_memory_accounting: true
+etcd_systemd_io_accounting: true
+
+# systemd hardening（第一+第二阶段，默认开启；如遇兼容性问题可关闭）
+etcd_systemd_hardening_enabled: true
+etcd_systemd_no_new_privileges: true
+etcd_systemd_private_tmp: true
+etcd_systemd_protect_home: true
+etcd_systemd_protect_system: "strict" # off|full|strict
+etcd_systemd_read_write_paths: "/data/etcd"
+etcd_systemd_protect_kernel_tunables: true
+
+# 对 snapshot/defrag 这类 oneshot service 的最小 hardening
+etcd_systemd_maintenance_hardening_enabled: true

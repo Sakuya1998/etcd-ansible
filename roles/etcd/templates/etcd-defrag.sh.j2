@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="{{ etcd_conf_dir }}/etcd.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+echo "[INFO] Defrag local member..."
+/usr/local/bin/etcdctl defrag
+
