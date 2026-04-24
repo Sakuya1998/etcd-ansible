@@ -1,0 +1,11 @@
+# docker compose v2 专用覆盖文件：
+# - `cgroupns_mode` 在老版 docker-compose(v1) 中不被支持，会导致 schema 校验失败。
+# - 但在部分宿主机（尤其 cgroup v2）上，systemd in container 需要 `--cgroupns=host` 才能正常启动。
+services:
+  etcd1:
+    cgroupns_mode: host
+  etcd2:
+    cgroupns_mode: host
+  etcd3:
+    cgroupns_mode: host
+

@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-compose="docker-compose"
+if docker compose version >/dev/null 2>&1; then
+  compose="docker compose -f docker-compose.yml -f docker-compose.v2.yml"
+else
+  compose="docker-compose -f docker-compose.yml"
+fi
 
 echo "[INFO] Build images"
 $compose build

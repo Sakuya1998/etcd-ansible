@@ -4,7 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-compose="docker-compose"
+if docker compose version >/dev/null 2>&1; then
+  # docker compose v2：可叠加 v2 专用覆盖文件（启用 cgroupns_mode 等能力）
+  compose="docker compose -f docker-compose.yml -f docker-compose.v2.yml"
+else
+  # docker-compose v1：不支持 cgroupns_mode，使用基础 compose 文件
+  compose="docker-compose -f docker-compose.yml"
+fi
 
 echo "[INFO] Build images"
 $compose build

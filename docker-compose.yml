@@ -18,7 +18,6 @@ services:
     container_name: solo-etcd1
     hostname: etcd1
     privileged: true
-    cgroupns_mode: host
     environment:
       - container=docker
       # 让 systemd 日志输出到容器 console，便于 `docker logs` 排障
@@ -45,7 +44,6 @@ services:
     container_name: solo-etcd2
     hostname: etcd2
     privileged: true
-    cgroupns_mode: host
     environment:
       - container=docker
       - SYSTEMD_LOG_LEVEL=debug
@@ -70,7 +68,6 @@ services:
     container_name: solo-etcd3
     hostname: etcd3
     privileged: true
-    cgroupns_mode: host
     environment:
       - container=docker
       - SYSTEMD_LOG_LEVEL=debug

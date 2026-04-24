@@ -5,7 +5,8 @@
 - `etcd1/etcd2/etcd3`：3 台“模拟主机”（systemd + sshd），用于跑 etcd role
 
 ## 前置条件
-- 本机已安装 Docker + docker compose plugin
+- 本机已安装 Docker
+- 推荐安装 `docker compose`（v2 plugin）。如果只有老的 `docker-compose`（v1）也可以运行，但在部分 cgroup v2 宿主机上，systemd in container 可能无法正常启动。
 
 ## 运行
 在仓库根目录执行：
