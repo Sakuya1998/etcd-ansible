@@ -19,12 +19,19 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[INFO] Wait for SSH to be ready"
+ssh_ready=0
 for i in {1..60}; do
   if $compose exec -T ansible bash -lc 'sshpass -p ansible ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ansible@etcd1 "echo ok" >/dev/null 2>&1'; then
+    ssh_ready=1
     break
   fi
   sleep 1
 done
+if [[ "$ssh_ready" -ne 1 ]]; then
+  echo "[ERROR] SSH is not ready (cannot reach etcd1 from ansible container)."
+  echo "[ERROR] Hint: check docker DNS/aliases for etcd1/etcd2/etcd3 in docker-compose network."
+  exit 1
+fi
 
 echo "[INFO] Ansible ping"
 $compose exec -T ansible bash -lc 'ANSIBLE_STDOUT_CALLBACK=default ansible -i inventories/docker/hosts.yml etcd -m ping'

@@ -27,7 +27,9 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - etcd1-data:/data
     networks:
-      - etcdnet
+      etcdnet:
+        aliases:
+          - etcd1
     command: ["/sbin/init"]
 
   etcd2:
@@ -46,7 +48,9 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - etcd2-data:/data
     networks:
-      - etcdnet
+      etcdnet:
+        aliases:
+          - etcd2
     command: ["/sbin/init"]
 
   etcd3:
@@ -65,7 +69,9 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - etcd3-data:/data
     networks:
-      - etcdnet
+      etcdnet:
+        aliases:
+          - etcd3
     command: ["/sbin/init"]
 
 networks:
