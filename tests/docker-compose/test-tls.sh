@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-compose="docker compose"
+compose="docker-compose"
 
 echo "[INFO] Build images"
 $compose build
@@ -27,13 +27,12 @@ for i in {1..60}; do
 done
 
 echo "[INFO] Bootstrap etcd cluster with TLS (auto PKI)"
-$compose exec -T ansible bash -lc 'ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-bootstrap.yml'
+$compose exec -T ansible bash -lc 'ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-bootstrap.yml'
 
 echo "[INFO] Rotate certificates (hot reload) and validate health"
-$compose exec -T ansible bash -lc 'ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-cert-rotate.yml --extra-vars "etcd_cert_rotate=true etcd_cert_force_rotate=true etcd_cert_rotate_mode=hot_reload"'
+$compose exec -T ansible bash -lc 'ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-cert-rotate.yml --extra-vars "etcd_cert_rotate=true etcd_cert_force_rotate=true etcd_cert_rotate_mode=hot_reload"'
 
 echo "[INFO] Health check"
-$compose exec -T ansible bash -lc 'ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-health.yml'
+$compose exec -T ansible bash -lc 'ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i inventories/docker-tls/hosts.yml playbooks/etcd-health.yml'
 
 echo "[INFO] PASS"
-
