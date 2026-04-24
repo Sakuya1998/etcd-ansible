@@ -18,19 +18,25 @@ services:
     container_name: solo-etcd1
     hostname: etcd1
     privileged: true
+    cgroupns_mode: host
     environment:
       - container=docker
+      # 让 systemd 日志输出到容器 console，便于 `docker logs` 排障
+      - SYSTEMD_LOG_LEVEL=debug
+      - SYSTEMD_LOG_TARGET=console
+      - SYSTEMD_LOG_COLOR=no
     tmpfs:
       - /run
       - /run/lock
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # systemd in container: need writable cgroup fs on some hosts (esp. cgroup v2)
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - etcd1-data:/data
     networks:
       etcdnet:
         aliases:
           - etcd1
-    command: ["/sbin/init"]
+    command: ["/sbin/init","--log-level=debug","--log-target=console","--log-color=no"]
 
   etcd2:
     build:
@@ -39,19 +45,23 @@ services:
     container_name: solo-etcd2
     hostname: etcd2
     privileged: true
+    cgroupns_mode: host
     environment:
       - container=docker
+      - SYSTEMD_LOG_LEVEL=debug
+      - SYSTEMD_LOG_TARGET=console
+      - SYSTEMD_LOG_COLOR=no
     tmpfs:
       - /run
       - /run/lock
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - etcd2-data:/data
     networks:
       etcdnet:
         aliases:
           - etcd2
-    command: ["/sbin/init"]
+    command: ["/sbin/init","--log-level=debug","--log-target=console","--log-color=no"]
 
   etcd3:
     build:
@@ -60,19 +70,23 @@ services:
     container_name: solo-etcd3
     hostname: etcd3
     privileged: true
+    cgroupns_mode: host
     environment:
       - container=docker
+      - SYSTEMD_LOG_LEVEL=debug
+      - SYSTEMD_LOG_TARGET=console
+      - SYSTEMD_LOG_COLOR=no
     tmpfs:
       - /run
       - /run/lock
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - etcd3-data:/data
     networks:
       etcdnet:
         aliases:
           - etcd3
-    command: ["/sbin/init"]
+    command: ["/sbin/init","--log-level=debug","--log-target=console","--log-color=no"]
 
 networks:
   etcdnet:
